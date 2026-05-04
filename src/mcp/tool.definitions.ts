@@ -20,6 +20,14 @@ export interface McpToolDefinition {
     properties: Record<string, any>;
     required?: string[];
   };
+  /** Optional annotations providing hints about the tool's behavior. */
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +110,18 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_create_user',
-    description: 'Create a new user in a tenant',
+    description:
+      '⚠ HIGH-IMPACT. Creates a new user account in the tenant, which grants ' +
+      'directory presence and may include initial credentials and license/role ' +
+      'eligibility. Reversible by deleting or disabling the user. ' +
+      'Confirm with the user before invoking.',
+    annotations: {
+      title: 'Create user (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -149,7 +168,18 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_edit_user',
-    description: "Edit an existing user's properties",
+    description:
+      "⚠ HIGH-IMPACT. Edits an existing user's properties, which can include " +
+      'directory attributes, usage location, and may grant or revoke roles or ' +
+      'license eligibility. Reversible by editing again. ' +
+      'Confirm with the user before invoking.',
+    annotations: {
+      title: 'Edit user (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -181,7 +211,16 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_disable_user',
-    description: 'Disable a user account',
+    description:
+      '⚠ HIGH-IMPACT. Disables a user account, blocking sign-in. Reversible by ' +
+      're-enabling the account. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Disable user (reversible)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -193,7 +232,16 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_reset_password',
-    description: "Reset a user's password",
+    description:
+      '⚠ HIGH-IMPACT. Resets a user\'s password, invalidating their current ' +
+      'password. Reversible by setting a new password. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Reset password (reversible)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,7 +258,16 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_reset_mfa',
-    description: 'Reset all MFA methods for a user',
+    description:
+      '⚠ HIGH-IMPACT. Resets all MFA methods for a user, requiring them to ' +
+      're-register their authentication methods. Reversible by re-enabling MFA. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Reset MFA (reversible)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,7 +279,16 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_revoke_sessions',
-    description: 'Revoke all active sessions for a user',
+    description:
+      '⚠ HIGH-IMPACT. Revokes all active sessions for a user, forcing them to ' +
+      're-authenticate. Reversible by the user signing in again. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Revoke sessions (reversible)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -235,7 +301,16 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: 'cipp_offboard_user',
     description:
-      'Offboard a user (disable, revoke sessions, optionally transfer data)',
+      '⚠ DESTRUCTIVE — IRREVERSIBLE. Completely offboards a user by disabling ' +
+      'their account, revoking sessions, removing group memberships, and optionally ' +
+      'transferring data. This comprehensive action cannot be easily undone. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Offboard user (irreversible)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -334,7 +409,17 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_create_group',
-    description: 'Create a new group in a tenant',
+    description:
+      '⚠ HIGH-IMPACT. Creates a new group in the tenant, which can be used for ' +
+      'security policy assignments (RBAC, Conditional Access) or mail distribution. ' +
+      'Reversible by deleting the group. Confirm with the user before invoking.',
+    annotations: {
+      title: 'Create group (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -404,7 +489,18 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_set_out_of_office',
-    description: 'Set out-of-office / auto-reply for a mailbox',
+    description:
+      '⚠ HIGH-IMPACT. Configures the out-of-office / auto-reply for a mailbox, ' +
+      'which causes automated messages to be sent to internal and/or external ' +
+      'senders. Reversible by disabling the auto-reply. ' +
+      'Confirm with the user before invoking.',
+    annotations: {
+      title: 'Set out-of-office (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -433,7 +529,18 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
   {
     name: 'cipp_set_email_forwarding',
-    description: 'Configure email forwarding for a mailbox',
+    description:
+      '⚠ HIGH-IMPACT. Configures email forwarding on a mailbox, silently ' +
+      "redirecting the user's incoming mail to another address. This is a common " +
+      'data-exfiltration vector. Reversible by removing the forwarding rule. ' +
+      'Confirm with the user before invoking.',
+    annotations: {
+      title: 'Set email forwarding (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: 'object',
       properties: {
