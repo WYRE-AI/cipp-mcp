@@ -115,6 +115,7 @@ jobs:
             type=sha,prefix=sha-
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
           context: .
@@ -188,30 +189,12 @@ jobs:
 
   deploy:
     name: Deploy to Azure Container Apps
-    needs: docker
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Azure login
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Deploy to Azure Container Apps
-        run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
-          IMAGE="ghcr.io/${{ github.repository }}:latest"
-          echo "Deploying $IMAGE to mcpgw-prod-cipp (revision tag sha-${SHORT_SHA}-${GITHUB_RUN_ID})"
-          az containerapp update \
-            --name mcpgw-prod-cipp \
-            --resource-group mcp-gateway-prod \
-            --image "$IMAGE" \
-            --set-env-vars "IMAGE_VERSION=sha-${SHORT_SHA}-${GITHUB_RUN_ID}"
+    needs: [release, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: wyre-technology/.github/.github/workflows/mcp-server-deploy.yml@c2d6fc89211757997102d100115d02997d4e3521
+    with:
+      vendor-slug: cipp
+      image-name: ghcr.io/wyre-technology/cipp-mcp
+      digest: ${{ needs.docker.outputs.digest }}
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit
