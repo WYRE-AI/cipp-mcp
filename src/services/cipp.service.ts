@@ -27,6 +27,14 @@ interface CippServiceConfig {
   };
 }
 
+/** Aggregated DNS health for a single domain (SPF / DMARC / DKIM). */
+export interface DomainHealthCheck {
+  domain: string;
+  spf: unknown;
+  dmarc: unknown;
+  dkim: unknown;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -165,8 +173,15 @@ export class CippService {
       );
     }
 
+    const text = await response.text();
+    if (text.trim() === '') {
+      // Some CIPP endpoints legitimately return HTTP 200 with an empty body.
+      // Treat that as "no content" rather than crashing on a JSON parse error.
+      return undefined as T;
+    }
+
     try {
-      return (await response.json()) as T;
+      return JSON.parse(text) as T;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new McpError(
@@ -581,13 +596,55 @@ export class CippService {
   }
 
   /**
-   * List DNS and domain health check results for a tenant.
-   * Calls the `ListDomainHealth` Azure Function.
+   * List the DNS domains registered in a tenant.
+   * Calls the `ListDomains` Azure Function.
    *
    * @param tenantFilter - Tenant domain or identifier.
    */
-  async listDomainHealth<T = unknown>(tenantFilter: string): Promise<T> {
-    return this.request<T>('GET', 'ListDomainHealth', { tenantFilter });
+  async listDomains<T = unknown>(tenantFilter: string): Promise<T> {
+    return this.request<T>('GET', 'ListDomains', { tenantFilter });
+  }
+
+  /**
+   * Check DNS health (SPF, DMARC, DKIM) for every domain in a tenant.
+   *
+   * The CIPP `ListDomainHealth` Azure Function is a per-domain DNS helper: it
+   * requires `Action` + `Domain` query parameters and ignores `tenantFilter`.
+   * Called with only `tenantFilter` it returns HTTP 200 with an empty body.
+   * This method therefore enumerates the tenant's domains via `ListDomains`
+   * first, then runs the SPF / DMARC / DKIM checks per domain.
+   *
+   * @param tenantFilter - Tenant domain or identifier.
+   * @returns One {@link DomainHealthCheck} per domain in the tenant.
+   */
+  async listDomainHealth(tenantFilter: string): Promise<DomainHealthCheck[]> {
+    const domains = await this.listDomains<Array<{ id?: string }>>(tenantFilter);
+    const domainNames = (Array.isArray(domains) ? domains : [])
+      .map((d) => d?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+    return Promise.all(
+      domainNames.map(async (domain) => {
+        const [spf, dmarc, dkim] = await Promise.all([
+          this.checkDomainRecord(domain, 'ReadSpfRecord'),
+          this.checkDomainRecord(domain, 'ReadDmarcPolicy'),
+          this.checkDomainRecord(domain, 'ReadDkimRecord'),
+        ]);
+        return { domain, spf, dmarc, dkim };
+      })
+    );
+  }
+
+  /**
+   * Run a single `ListDomainHealth` DNS check for one domain. Per-check
+   * failures are captured so one bad lookup does not sink the whole tenant.
+   */
+  private async checkDomainRecord(domain: string, action: string): Promise<unknown> {
+    try {
+      return await this.request('GET', 'ListDomainHealth', { Action: action, Domain: domain });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   // -------------------------------------------------------------------------

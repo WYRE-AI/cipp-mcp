@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gateway-mode headers for OAuth: `x-tenant-id`, `x-client-id`,
   `x-client-secret`, `x-token-scope`, `x-token-url`.
 
+### Fixed
+- `cipp_list_domain_health` returned no data — it called CIPP's
+  `ListDomainHealth` function with only `tenantFilter`. That function is a
+  per-domain DNS helper requiring `Action` + `Domain` query parameters and
+  ignores `tenantFilter`; called without them it returns HTTP 200 with an
+  empty body, which crashed the client with "Unexpected end of JSON input".
+  The tool now enumerates the tenant's domains via `ListDomains`, then runs
+  the SPF / DMARC / DKIM checks per domain.
+- The HTTP client no longer throws a JSON-parse error on an empty `2xx`
+  response body; such responses are treated as "no content".
+
 ### Changed
 - `CIPP_API_KEY` remains supported as a static Bearer token for backwards
   compatibility. When both static and OAuth credentials are provided, the
