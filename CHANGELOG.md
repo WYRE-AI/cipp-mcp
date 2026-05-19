@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the SPF / DMARC / DKIM checks per domain.
 - The HTTP client no longer throws a JSON-parse error on an empty `2xx`
   response body; such responses are treated as "no content".
+- `cipp_list_domain_health` could time out at the MCP gateway on tenants
+  with several domains: each SPF / DMARC / DKIM check resolves DNS
+  server-side at CIPP and the fan-out of slow lookups exceeded the
+  gateway's tool-call deadline. Each per-domain DNS check now carries a
+  15s abort timeout; a stuck lookup is reported as an `{ error }`
+  placeholder for that record instead of hanging the whole tenant.
 
 ### Changed
 - `CIPP_API_KEY` remains supported as a static Bearer token for backwards

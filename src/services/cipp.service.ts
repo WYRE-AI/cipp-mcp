@@ -35,6 +35,14 @@ export interface DomainHealthCheck {
   dkim: unknown;
 }
 
+/**
+ * Per-check timeout (ms) for `ListDomainHealth` DNS lookups. Each check
+ * resolves DNS server-side at CIPP and can be slow; bounding each one keeps
+ * a single stuck lookup from hanging the whole tenant response past the
+ * MCP gateway's tool-call deadline.
+ */
+const DOMAIN_HEALTH_CHECK_TIMEOUT_MS = 15_000;
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -102,7 +110,8 @@ export class CippService {
     method: HttpMethod,
     path: string,
     params?: Record<string, unknown>,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    timeoutMs?: number
   ): Promise<T> {
     if (!this.baseUrl) {
       throw new McpError(ErrorCode.InvalidParams, 'CIPP_BASE_URL is not configured. Set it in your environment or MCP client config.');
@@ -138,6 +147,12 @@ export class CippService {
 
     if (method !== 'GET' && body !== undefined) {
       requestInit.body = JSON.stringify(body);
+    }
+
+    if (timeoutMs !== undefined) {
+      // Aborts the fetch if the response is not received in time. The abort
+      // surfaces as a network error below, which callers can catch per request.
+      requestInit.signal = AbortSignal.timeout(timeoutMs);
     }
 
     this.logger.debug('CIPP API request', { method, url: url.toString() });
@@ -641,7 +656,13 @@ export class CippService {
    */
   private async checkDomainRecord(domain: string, action: string): Promise<unknown> {
     try {
-      return await this.request('GET', 'ListDomainHealth', { Action: action, Domain: domain });
+      return await this.request(
+        'GET',
+        'ListDomainHealth',
+        { Action: action, Domain: domain },
+        undefined,
+        DOMAIN_HEALTH_CHECK_TIMEOUT_MS
+      );
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
     }

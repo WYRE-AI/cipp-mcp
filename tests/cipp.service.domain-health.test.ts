@@ -81,4 +81,50 @@ describe('CippService.listDomainHealth', () => {
     global.fetch = jest.fn(() => Promise.resolve(emptyResponse())) as unknown as typeof fetch;
     await expect(svc.listDomainHealth('contoso.com')).resolves.toEqual([]);
   });
+
+  it('bounds each per-domain DNS check with an abort signal', async () => {
+    const fetchMock = jest.fn((url: string, _init?: RequestInit) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('/api/ListDomains')) {
+        return Promise.resolve(jsonResponse([{ id: 'contoso.com' }]));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await svc.listDomainHealth('contoso.com');
+
+    // Every ListDomainHealth call must carry an AbortSignal so a slow DNS
+    // lookup cannot hang the whole tenant response.
+    const healthCalls = fetchMock.mock.calls.filter((c) =>
+      (c[0] as string).includes('/api/ListDomainHealth')
+    );
+    expect(healthCalls).toHaveLength(3);
+    for (const call of healthCalls) {
+      const init = call[1] as RequestInit | undefined;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it('captures a failed check as an error placeholder without sinking the tenant', async () => {
+    const fetchMock = jest.fn((url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('/api/ListDomains')) {
+        return Promise.resolve(jsonResponse([{ id: 'contoso.com' }]));
+      }
+      if (u.searchParams.get('Action') === 'ReadDkimRecord') {
+        return Promise.reject(new Error('The operation was aborted due to timeout'));
+      }
+      return Promise.resolve(jsonResponse({ record: u.searchParams.get('Action') }));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = (await svc.listDomainHealth('contoso.com')) as unknown as Array<
+      Record<string, unknown>
+    >;
+
+    expect(result).toHaveLength(1);
+    expect(result[0].spf).toMatchObject({ record: 'ReadSpfRecord' });
+    expect(result[0].dkim).toMatchObject({ error: expect.stringContaining('aborted') });
+  });
 });
