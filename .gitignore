@@ -5,3 +5,6 @@ dist/
 *.log
 coverage/
 .DS_Store
+
+# Claude Code local runtime artifacts
+.claude/
