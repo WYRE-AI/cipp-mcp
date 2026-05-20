@@ -636,7 +636,11 @@ export class CippService {
     const domains = await this.listDomains<Array<{ id?: string }>>(tenantFilter);
     const domainNames = (Array.isArray(domains) ? domains : [])
       .map((d) => d?.id)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      // Skip the tenant's `.onmicrosoft.com` routing domain: it carries no
+      // real customer mail DNS, so SPF/DMARC/DKIM checks against it only
+      // ever hang or fail with no actionable result.
+      .filter((id) => !id.toLowerCase().endsWith('.onmicrosoft.com'));
 
     return Promise.all(
       domainNames.map(async (domain) => {

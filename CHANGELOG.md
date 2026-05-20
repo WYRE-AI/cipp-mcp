@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placeholder for that record instead of hanging the whole tenant.
 
 ### Changed
+- `cipp_list_domain_health` now skips the tenant's `.onmicrosoft.com`
+  routing domain. That domain carries no real customer mail DNS, so its
+  SPF / DMARC / DKIM checks only ever hung or failed with no actionable
+  result.
 - `CIPP_API_KEY` remains supported as a static Bearer token for backwards
   compatibility. When both static and OAuth credentials are provided, the
   static `apiKey` wins.

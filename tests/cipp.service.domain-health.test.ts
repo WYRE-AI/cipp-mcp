@@ -50,7 +50,7 @@ describe('CippService.listDomainHealth', () => {
     const fetchMock = jest.fn((url: string) => {
       const u = new URL(url);
       if (u.pathname.endsWith('/api/ListDomains')) {
-        return Promise.resolve(jsonResponse([{ id: 'contoso.com' }, { id: 'contoso.onmicrosoft.com' }]));
+        return Promise.resolve(jsonResponse([{ id: 'contoso.com' }, { id: 'contoso.net' }]));
       }
       if (u.pathname.endsWith('/api/ListDomainHealth')) {
         return Promise.resolve(
@@ -80,6 +80,30 @@ describe('CippService.listDomainHealth', () => {
   it('returns an empty list (no crash) when the tenant has no domains', async () => {
     global.fetch = jest.fn(() => Promise.resolve(emptyResponse())) as unknown as typeof fetch;
     await expect(svc.listDomainHealth('contoso.com')).resolves.toEqual([]);
+  });
+
+  it('skips .onmicrosoft.com routing domains', async () => {
+    const fetchMock = jest.fn((url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('/api/ListDomains')) {
+        return Promise.resolve(
+          jsonResponse([{ id: 'contoso.com' }, { id: 'contoso.onmicrosoft.com' }])
+        );
+      }
+      return Promise.resolve(jsonResponse({ domain: u.searchParams.get('Domain') }));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = (await svc.listDomainHealth('contoso.com')) as unknown as Array<
+      Record<string, unknown>
+    >;
+
+    // The routing domain carries no real mail DNS, so it is not checked.
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ domain: 'contoso.com' });
+
+    const calls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(calls.some((c) => c.includes('onmicrosoft.com'))).toBe(false);
   });
 
   it('bounds each per-domain DNS check with an abort signal', async () => {
