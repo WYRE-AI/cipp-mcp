@@ -315,6 +315,38 @@ export class CippToolHandler {
           break;
         }
 
+        case 'cipp_list_standard_templates': {
+          result = await this.cippService.listStandardTemplates();
+          break;
+        }
+
+        // `tenantFilter` is optional for these two tools: omit it to report
+        // across all tenants. This diverges intentionally from other Standards
+        // cases that require it.
+        case 'cipp_get_tenant_drift': {
+          const { tenantFilter } = args as { tenantFilter?: string };
+          result = await this.cippService.getTenantDrift(tenantFilter);
+          break;
+        }
+
+        case 'cipp_get_tenant_alignment': {
+          const { tenantFilter } = args as { tenantFilter?: string };
+          result = await this.cippService.getTenantAlignment(tenantFilter);
+          break;
+        }
+
+        case 'cipp_create_standard_template': {
+          const { template } = args as { template: Record<string, unknown> };
+          result = await this.cippService.createStandardTemplate(template);
+          break;
+        }
+
+        case 'cipp_delete_standard_template': {
+          const { templateId } = args as { templateId: string };
+          result = await this.cippService.deleteStandardTemplate(templateId);
+          break;
+        }
+
         case 'cipp_list_bpa': {
           const { tenantFilter } = args as { tenantFilter: string };
           result = await this.cippService.listBPA(tenantFilter);
