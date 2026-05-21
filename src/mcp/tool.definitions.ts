@@ -617,6 +617,113 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     },
   },
   {
+    name: 'cipp_list_standard_templates',
+    description: 'List the CIPP Standards Templates configured across the partner tenant.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    annotations: {
+      title: 'List standards templates',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
+  {
+    name: 'cipp_get_tenant_drift',
+    description:
+      'Report standards drift — settings that deviate from a tenant\'s assigned ' +
+      'Standards Template. Omit tenantFilter to report drift across all tenants.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            'Optional tenant domain or ID. Omit to report drift across all managed tenants.',
+        },
+      },
+    },
+    annotations: {
+      title: 'Get tenant standards drift',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
+  {
+    name: 'cipp_get_tenant_alignment',
+    description:
+      "Report each tenant's alignment percentage against its assigned Standards " +
+      'Templates — the key signal for deciding which standards are safe to ' +
+      'promote to Remediate. Omit tenantFilter to report on all tenants.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            'Optional tenant domain or ID. Omit to report alignment across all managed tenants.',
+        },
+      },
+    },
+    annotations: {
+      title: 'Get tenant standards alignment',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
+  {
+    name: 'cipp_create_standard_template',
+    description:
+      '⚠ HIGH-IMPACT. Creates or updates a CIPP Standards Template (upsert by ' +
+      'GUID). A template assigned to tenants with any Remediate-action standard ' +
+      'WILL modify those tenants on the next standards run. ' +
+      'Confirm with the user before invoking.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        template: {
+          type: 'object',
+          description:
+            'The full Standards Template JSON object. Must include a "tenantFilter" ' +
+            'assigning it to at least one tenant.',
+        },
+      },
+      required: ['template'],
+    },
+    annotations: {
+      title: 'Create/update standards template (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'cipp_delete_standard_template',
+    description:
+      '⚠ HIGH-IMPACT. Permanently deletes a CIPP Standards Template by ID. ' +
+      'Tenants assigned to it lose the standards it enforced. ' +
+      'Confirm with the user before invoking.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        templateId: {
+          type: 'string',
+          description: 'The GUID of the Standards Template to delete.',
+        },
+      },
+      required: ['templateId'],
+    },
+    annotations: {
+      title: 'Delete standards template (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
     name: 'cipp_list_bpa',
     description: 'Get Best Practice Analyser results for a tenant',
     inputSchema: {
@@ -831,6 +938,11 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
   standards: [
     'cipp_list_standards',
     'cipp_run_standards_check',
+    'cipp_list_standard_templates',
+    'cipp_get_tenant_drift',
+    'cipp_get_tenant_alignment',
+    'cipp_create_standard_template',
+    'cipp_delete_standard_template',
     'cipp_list_bpa',
     'cipp_list_domain_health',
   ],
