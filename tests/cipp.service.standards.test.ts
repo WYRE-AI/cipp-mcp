@@ -147,4 +147,18 @@ describe('CippService standards template tooling', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     }
   );
+
+  it('deleteStandardTemplate POSTs RemoveStandardTemplate with the template ID', async () => {
+    const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(
+      () => Promise.resolve(jsonResponse({ Results: 'deleted' }))
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await svc.deleteStandardTemplate('guid-123');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(new URL(url).pathname).toMatch(/\/api\/RemoveStandardTemplate$/);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ ID: 'guid-123' });
+  });
 });

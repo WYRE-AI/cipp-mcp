@@ -669,6 +669,18 @@ export class CippService {
   }
 
   /**
+   * Delete a CIPP Standards Template by ID.
+   * Calls the `RemoveStandardTemplate` Azure Function.
+   *
+   * @param templateId - The GUID of the Standards Template to delete.
+   */
+  async deleteStandardTemplate<T = unknown>(templateId: string): Promise<T> {
+    return this.request<T>('POST', 'RemoveStandardTemplate', undefined, {
+      ID: templateId,
+    });
+  }
+
+  /**
    * Retrieve Best Practice Analyser (BPA) results for a tenant.
    * Calls the `ListBPA` Azure Function.
    *
