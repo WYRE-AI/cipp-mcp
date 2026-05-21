@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (optional: `CIPP_TOKEN_SCOPE`, `CIPP_TOKEN_URL`).
 - Gateway-mode headers for OAuth: `x-tenant-id`, `x-client-id`,
   `x-client-secret`, `x-token-scope`, `x-token-url`.
+- Standards Template tooling: `cipp_list_standard_templates`,
+  `cipp_create_standard_template`, and `cipp_delete_standard_template`
+  manage CIPP Standards Templates; `cipp_get_tenant_drift` and
+  `cipp_get_tenant_alignment` report per-tenant standards drift and
+  alignment. This lets a standards baseline be managed as code.
 
 ### Fixed
 - `cipp_list_domain_health` returned no data — it called CIPP's
