@@ -601,6 +601,44 @@ export class CippService {
   }
 
   /**
+   * List the CIPP Standards Templates configured across the partner tenant.
+   * Calls the `listStandardTemplates` Azure Function.
+   */
+  async listStandardTemplates<T = unknown>(): Promise<T> {
+    // CIPP names this function with a lowercase 'l' — do not capitalise.
+    return this.request<T>('GET', 'listStandardTemplates');
+  }
+
+  /**
+   * Report standards drift for a tenant, or for every tenant when no
+   * `tenantFilter` is given. Calls the `ListTenantDrift` Azure Function.
+   *
+   * @param tenantFilter - Optional tenant domain or identifier.
+   */
+  async getTenantDrift<T = unknown>(tenantFilter?: string): Promise<T> {
+    return this.request<T>(
+      'GET',
+      'ListTenantDrift',
+      tenantFilter ? { tenantFilter } : undefined
+    );
+  }
+
+  /**
+   * Report each tenant's alignment percentage against its assigned
+   * Standards Templates, or for every tenant when no `tenantFilter` is
+   * given. Calls the `ListTenantAlignment` Azure Function.
+   *
+   * @param tenantFilter - Optional tenant domain or identifier.
+   */
+  async getTenantAlignment<T = unknown>(tenantFilter?: string): Promise<T> {
+    return this.request<T>(
+      'GET',
+      'ListTenantAlignment',
+      tenantFilter ? { tenantFilter } : undefined
+    );
+  }
+
+  /**
    * Retrieve Best Practice Analyser (BPA) results for a tenant.
    * Calls the `ListBPA` Azure Function.
    *
