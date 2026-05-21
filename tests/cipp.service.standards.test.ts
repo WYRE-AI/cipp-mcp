@@ -97,4 +97,54 @@ describe('CippService standards template tooling', () => {
     expect(parsed.pathname).toMatch(/\/api\/ListTenantAlignment$/);
     expect(parsed.searchParams.has('tenantFilter')).toBe(false);
   });
+
+  it('createStandardTemplate POSTs the template body to AddStandardsTemplate intact', async () => {
+    const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(
+      () => Promise.resolve(jsonResponse({ Results: 'ok' }))
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const template = {
+      templateName: 'WYRE Baseline',
+      tenantFilter: [{ value: 'AllTenants' }],
+      standards: { someStandard: {} },
+    };
+    await svc.createStandardTemplate(template);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(new URL(url).pathname).toMatch(/\/api\/AddStandardsTemplate$/);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual(template);
+  });
+
+  it('createStandardTemplate rejects a template missing tenantFilter without calling CIPP', async () => {
+    const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(
+      () => Promise.resolve(jsonResponse({}))
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      svc.createStandardTemplate({ templateName: 'no assignment' })
+    ).rejects.toThrow(/must include a "tenantFilter"/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', []],
+    ['a primitive string', 'bad-input'],
+  ] as const)(
+    'createStandardTemplate rejects a non-object template (%s)',
+    async (_label, badInput) => {
+      const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(
+        () => Promise.resolve(jsonResponse({}))
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        svc.createStandardTemplate(badInput as unknown as Record<string, unknown>)
+      ).rejects.toThrow(/JSON object/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
 });
