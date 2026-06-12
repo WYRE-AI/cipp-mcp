@@ -8,7 +8,10 @@ startCommand:
     properties:
       cippBaseUrl:
         type: string
-        description: The base URL of your CIPP deployment (e.g. https://cipp.yourdomain.com)
+        description: |
+          The CIPP-API Azure Function App URL (e.g.
+          https://cippXXXXX.azurewebsites.net). Do NOT use the Static Web App /
+          custom-domain UI URL — it redirects bearer tokens to interactive login.
       cippApiKey:
         type: string
         description: |

@@ -87,7 +87,7 @@ volumes:
     driver: local
 
 # Example .env file structure (create this file with your actual credentials):
-# CIPP_BASE_URL=https://cipp.yourdomain.com
+# CIPP_BASE_URL=https://cippXXXXX.azurewebsites.net   # Function App URL, not the SWA UI URL
 # CIPP_API_KEY=your-api-key-here
 # LOG_LEVEL=info
 # LOG_FORMAT=json

@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alignment. This lets a standards baseline be managed as code.
 
 ### Fixed
+- Documentation pointed `CIPP_BASE_URL` at the Static Web App / custom-domain
+  UI URL (`https://cipp.yourdomain.com`). The SWA's built-in auth redirects
+  bearer-token requests to its interactive login page, so every API call
+  fails. All examples (README, `.env.example`, `smithery.yaml`,
+  `manifest.json`, `docker-compose.yml`) now use the CIPP-API Azure Function
+  App URL (`https://<function-app-name>.azurewebsites.net`) and the README
+  explains the distinction.
 - `cipp_list_domain_health` returned no data — it called CIPP's
   `ListDomainHealth` function with only `tenantFilter`. That function is a
   per-domain DNS helper requiring `Action` + `Domain` query parameters and
