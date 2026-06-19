@@ -301,6 +301,18 @@ export class CippToolHandler {
         }
 
         // -----------------------------------------------------------------------
+        // Applications
+        // -----------------------------------------------------------------------
+        case 'cipp_list_enterprise_apps': {
+          const { tenantFilter, includeBuiltIn } = args as {
+            tenantFilter: string;
+            includeBuiltIn?: boolean;
+          };
+          result = await this.cippService.listEnterpriseApps(tenantFilter, { includeBuiltIn });
+          break;
+        }
+
+        // -----------------------------------------------------------------------
         // Standards
         // -----------------------------------------------------------------------
         case 'cipp_list_standards': {

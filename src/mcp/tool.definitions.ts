@@ -592,6 +592,27 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
 
   // -------------------------------------------------------------------------
+  // Applications tools
+  // -------------------------------------------------------------------------
+  {
+    name: 'cipp_list_enterprise_apps',
+    description:
+      "List enterprise applications (service principals) in a tenant — including third-party SaaS apps that customers have integrated via OAuth (Slack, Salesforce, Zoom, etc.). Returns appId, displayName, publisher, owner-org, signInAudience, tags, and creation date. Use tenantFilter='allTenants' for cross-tenant fan-out — CIPP handles per-tenant errors inline, so a 403 from one opt-out tenant returns as an error row rather than failing the call. Excludes Microsoft-built-in apps by default (owner org f8cdef31-…); pass includeBuiltIn=true to include them.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: TENANT_FILTER_PROP,
+        includeBuiltIn: {
+          type: 'boolean',
+          description:
+            "When true, includes Microsoft-built-in service principals (owner org f8cdef31-a31e-4b4a-93e4-5f571e91255a). Defaults to false (third-party / customer-installed apps only).",
+        },
+      },
+      required: ['tenantFilter'],
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // Standards tools
   // -------------------------------------------------------------------------
   {
@@ -935,6 +956,7 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
     'cipp_set_email_forwarding',
   ],
   security: ['cipp_list_conditional_access_policies', 'cipp_list_named_locations'],
+  applications: ['cipp_list_enterprise_apps'],
   standards: [
     'cipp_list_standards',
     'cipp_run_standards_check',

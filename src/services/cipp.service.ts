@@ -845,4 +845,44 @@ export class CippService {
   async addScheduledItem<T = unknown>(itemData: Record<string, unknown>): Promise<T> {
     return this.request<T>('POST', 'AddScheduledItem', undefined, itemData);
   }
+
+  // -------------------------------------------------------------------------
+  // Applications
+  // -------------------------------------------------------------------------
+
+  /**
+   * List enterprise applications (service principals) in a tenant.
+   * Calls the `ListGraphRequest` Azure Function with the `/servicePrincipals` Graph endpoint.
+   *
+   * Used to discover third-party SaaS apps customers have integrated via OAuth
+   * (Slack, Salesforce, Zoom, etc.) — the foundation of the data-driven catalog
+   * audit that ranks customer SaaS apps by tenant-frequency.
+   *
+   * @param tenantFilter - Tenant domain or identifier, or 'allTenants' for cross-tenant fan-out.
+   * @param params - Optional filter parameters.
+   * @param params.includeBuiltIn - When true, includes Microsoft-built-in service principals
+   *   (owner org f8cdef31-a31e-4b4a-93e4-5f571e91255a). Defaults to false (third-party only).
+   *
+   * @remarks
+   * For `tenantFilter='allTenants'`, CIPP's `ListGraphRequest` backend handles the fan-out
+   * across all managed tenants server-side and represents per-tenant errors (e.g. 403 from a
+   * tenant that hasn't granted GDAP delegated admin) as inline error rows in the response —
+   * one opt-out does NOT fail the whole call.
+   */
+  async listEnterpriseApps<T = unknown>(
+    tenantFilter: string,
+    params?: { includeBuiltIn?: boolean }
+  ): Promise<T> {
+    const MICROSOFT_OWNER_ORG_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a';
+    const query: Record<string, unknown> = {
+      tenantFilter,
+      Endpoint: '/servicePrincipals',
+      $select:
+        'appId,displayName,publisherName,appOwnerOrganizationId,signInAudience,tags,createdDateTime',
+    };
+    if (!params?.includeBuiltIn) {
+      query.$filter = `appOwnerOrganizationId ne ${MICROSOFT_OWNER_ORG_ID}`;
+    }
+    return this.request<T>('GET', 'ListGraphRequest', query);
+  }
 }

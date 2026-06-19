@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `cipp_list_enterprise_apps` tool — list enterprise applications
+  (service principals) in a tenant via the CIPP `ListGraphRequest`
+  passthrough against the `/servicePrincipals` Graph endpoint. Returns
+  `appId`, `displayName`, `publisherName`, `appOwnerOrganizationId`,
+  `signInAudience`, `tags`, and `createdDateTime`. Default filter
+  excludes Microsoft-built-in apps (owner-org `f8cdef31-…`); pass
+  `includeBuiltIn=true` to include them. Supports `tenantFilter='allTenants'`
+  for cross-tenant fan-out — CIPP returns per-tenant errors (e.g. 403 from
+  a tenant without GDAP delegated admin) as inline error rows rather than
+  failing the whole call. This is the data foundation for the per-tenant
+  SaaS-catalog audit (rank customer apps by tenant-frequency).
 - OAuth 2.0 client-credentials auth against Entra ID. CIPP's "API Clients"
   integration page issues a client ID + secret — the server now exchanges
   those for a short-lived access token per request and caches it until expiry.
