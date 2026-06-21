@@ -270,7 +270,6 @@ Tool categories:
         });
 
         server
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .connect(transport as any)
           .then(() => {
             transport.handleRequest(req, res);
