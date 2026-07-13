@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alignment. This lets a standards baseline be managed as code.
 
 ### Fixed
+- Unresolved MCPB/DXT config placeholders in credentials no longer break auth.
+  Desktop bundles map env vars to `${user_config.X}` in `manifest.json`; when an
+  optional field (e.g. the API key) is left blank the host injects the literal
+  string `${user_config.cipp_api_key}` rather than an empty value. Because that
+  literal is truthy, it silently overrode the OAuth client-credentials path and
+  was sent as `Authorization: Bearer ${user_config.cipp_api_key}`, 401'ing every
+  request. Credentials are now sanitised at ingress (`cleanCredential` /
+  `sanitizeCredentials` in `src/utils/config.ts`) so empty, whitespace-only, and
+  `${...}` placeholder values are treated as absent across all sources (env vars,
+  gateway env promotion, and HTTP headers). Mirrors itglue-mcp #73.
 - Documentation pointed `CIPP_BASE_URL` at the Static Web App / custom-domain
   UI URL (`https://cipp.yourdomain.com`). The SWA's built-in auth redirects
   bearer-token requests to its interactive login page, so every API call

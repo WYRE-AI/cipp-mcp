@@ -77,6 +77,53 @@ export interface GatewayCredentials {
   tokenUrl: string | undefined;
 }
 
+// An unresolved MCPB/DXT manifest placeholder, e.g. "${user_config.cipp_api_key}".
+// Desktop hosts (Claude Desktop) inject the config template verbatim when its
+// optional user_config field is left blank, so the literal string arrives in the
+// env var / header rather than an empty value or an omitted key.
+const CONFIG_PLACEHOLDER = /^\$\{.*\}$/;
+
+/**
+ * Normalise a single credential read from an env var or gateway header.
+ *
+ * Returns `undefined` for values that are effectively absent, so the auth layer
+ * treats them as "no credential" rather than a real secret:
+ *   - undefined / empty / whitespace-only
+ *   - an unresolved manifest placeholder like `${user_config.cipp_api_key}`
+ *
+ * Root cause of the itglue-mcp #73 pattern: CIPP supports two auth modes — a
+ * static Bearer API key OR OAuth client-credentials. A user configuring OAuth
+ * leaves the optional API-key field blank, which leaves the literal
+ * `${user_config.cipp_api_key}` in `CIPP_API_KEY`. Because that string is
+ * truthy, `CippService` (see the `if (!apiKey && tenantId && clientId &&
+ * clientSecret)` guard) never builds the OAuth `TokenProvider` and instead
+ * sends `Authorization: Bearer ${user_config.cipp_api_key}` on every request —
+ * a guaranteed 401. Stripping the placeholder here lets the OAuth path engage.
+ */
+export function cleanCredential(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || CONFIG_PLACEHOLDER.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+/**
+ * Sanitise every field of a credential set at ingress, dropping empty and
+ * unresolved-placeholder values. Applied to all credential sources (gateway env
+ * vars, HTTP headers, and direct env reads) so a placeholder never reaches the
+ * auth layer as a secret.
+ */
+export function sanitizeCredentials(creds: GatewayCredentials): GatewayCredentials {
+  return {
+    apiKey: cleanCredential(creds.apiKey),
+    baseUrl: cleanCredential(creds.baseUrl),
+    tenantId: cleanCredential(creds.tenantId),
+    clientId: cleanCredential(creds.clientId),
+    clientSecret: cleanCredential(creds.clientSecret),
+    tokenScope: cleanCredential(creds.tokenScope),
+    tokenUrl: cleanCredential(creds.tokenUrl),
+  };
+}
+
 /**
  * Extract CIPP credentials from gateway-injected environment variables.
  *
@@ -85,7 +132,7 @@ export interface GatewayCredentials {
  * - `X-Base-Url` header →  `X_BASE_URL` env var (falls back to `CIPP_BASE_URL`)
  */
 export function getCredentialsFromGateway(): GatewayCredentials {
-  return {
+  return sanitizeCredentials({
     apiKey: process.env.X_API_KEY || process.env.CIPP_API_KEY,
     baseUrl: process.env.X_BASE_URL || process.env.CIPP_BASE_URL,
     tenantId: process.env.X_TENANT_ID || process.env.CIPP_TENANT_ID,
@@ -93,7 +140,7 @@ export function getCredentialsFromGateway(): GatewayCredentials {
     clientSecret: process.env.X_CLIENT_SECRET || process.env.CIPP_CLIENT_SECRET,
     tokenScope: process.env.X_TOKEN_SCOPE || process.env.CIPP_TOKEN_SCOPE,
     tokenUrl: process.env.X_TOKEN_URL || process.env.CIPP_TOKEN_URL,
-  };
+  });
 }
 
 /**
@@ -113,7 +160,7 @@ export function parseCredentialsFromHeaders(
     return Array.isArray(value) ? value[0] : value;
   };
 
-  return {
+  return sanitizeCredentials({
     apiKey: getHeader('x-api-key'),
     baseUrl: getHeader('x-base-url'),
     tenantId: getHeader('x-tenant-id'),
@@ -121,7 +168,7 @@ export function parseCredentialsFromHeaders(
     clientSecret: getHeader('x-client-secret'),
     tokenScope: getHeader('x-token-scope'),
     tokenUrl: getHeader('x-token-url'),
-  };
+  });
 }
 
 /**
@@ -156,7 +203,7 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
   // falls back to CIPP_* vars internally, so it is safe to call in both modes.
   const creds: GatewayCredentials = authMode === 'gateway'
     ? getCredentialsFromGateway()
-    : {
+    : sanitizeCredentials({
         apiKey: process.env.CIPP_API_KEY,
         baseUrl: process.env.CIPP_BASE_URL,
         tenantId: process.env.CIPP_TENANT_ID,
@@ -164,7 +211,7 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
         clientSecret: process.env.CIPP_CLIENT_SECRET,
         tokenScope: process.env.CIPP_TOKEN_SCOPE,
         tokenUrl: process.env.CIPP_TOKEN_URL,
-      };
+      });
 
   // Build the cipp sub-object, omitting undefined values so that
   // exactOptionalPropertyTypes is satisfied in strict tsconfig setups.
