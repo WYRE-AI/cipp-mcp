@@ -113,6 +113,8 @@ export class CippToolHandler {
             jobTitle,
             department,
             usageLocation,
+            licenses,
+            removeLicenses,
           } = args as {
             tenantFilter: string;
             userId: string;
@@ -120,13 +122,22 @@ export class CippToolHandler {
             jobTitle?: string;
             department?: string;
             usageLocation?: string;
+            licenses?: string[];
+            removeLicenses?: boolean;
           };
           const editData: Record<string, unknown> = {};
           if (displayName !== undefined) editData.displayName = displayName;
           if (jobTitle !== undefined) editData.jobTitle = jobTitle;
           if (department !== undefined) editData.department = department;
           if (usageLocation !== undefined) editData.usageLocation = usageLocation;
-          result = await this.cippService.editUser(tenantFilter, userId, editData);
+          const licenseOptions =
+            licenses !== undefined || removeLicenses !== undefined
+              ? {
+                  ...(licenses !== undefined ? { licenses } : {}),
+                  ...(removeLicenses !== undefined ? { removeLicenses } : {}),
+                }
+              : undefined;
+          result = await this.cippService.editUser(tenantFilter, userId, editData, licenseOptions);
           break;
         }
 
