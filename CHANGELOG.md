@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`cipp_edit_user` sent a payload shape upstream never reads — UPN handling and licenses were broken** ([#67](https://github.com/wyre-technology/cipp-mcp/issues/67)). CIPP's `Invoke-EditUser` rebuilds the account's `userPrincipalName` on every call from the body's `username` + `Domain` fields (it never reads a `userPrincipalName` field), and reads licenses as `[{ value: skuId }]` objects plus a `removeLicenses` boolean. Our service sent neither shape: any edit risked an HTTP 500 ("The domain portion of the userPrincipalName property is invalid") or, worse, a silent account rename, and license changes were impossible.
+  - `editUser` now resolves the target's current identity first (one narrow `ListUsers` lookup by `UserID` or `graphFilter`) and always sends `username` + `Domain` from the resolved UPN; it refuses to edit when the user cannot be resolved rather than risking a rename.
+  - New `licenses` (reconciled SKU list, sent as `[{ value }]`) and `removeLicenses` parameters on `cipp_edit_user`; the mutually exclusive combination is rejected.
+  - `EditUser` returns HTTP 200 even when the underlying operations fail (upstream reports failures as strings in `Results`); the service now parses `Results` and reports `status: "failed"` with the failure strings instead of implying success.
+  - 11 new tests in `tests/cipp.service.edit-user.test.ts`. Fix approach and tests adapted from PR [#66](https://github.com/wyre-technology/cipp-mcp/pull/66) by @pdlaskbis (self-closed before review) — verified independently against upstream `Invoke-EditUser.ps1`.
+
 ### Added
 - `cipp_list_enterprise_apps` tool — list enterprise applications
   (service principals) in a tenant via the CIPP `ListGraphRequest`

@@ -205,6 +205,17 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           description:
             "Two-letter ISO 3166-1 alpha-2 country code for license assignment eligibility (e.g. 'US'). Required before assigning most Microsoft 365 licences.",
         },
+        licenses: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'License SKU GUIDs the user should hold after the edit (CIPP reconciles: missing SKUs are added, extra assigned SKUs are removed). Use cipp_list_licenses to discover SKU ids. Mutually exclusive with removeLicenses=true.',
+        },
+        removeLicenses: {
+          type: 'boolean',
+          description:
+            '⚠ When true, strips EVERY license assigned to the user. Mutually exclusive with a non-empty licenses list.',
+        },
       },
       required: ['tenantFilter', 'userId'],
     },
