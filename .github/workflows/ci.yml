@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Thin caller for the canonical reusable CI workflow (lint/typecheck/build/test).
+# release.yml only runs the release path (semantic-release/docker/registry) on
+# push to main — this is the PR-time build/test/lint gate release.yml's own
+# comment says belongs here, previously missing entirely (mcp-assert.yml only
+# boots the server + pings a canary tool, it doesn't build/lint/test).
+jobs:
+  test:
+    permissions:
+      contents: read
+      packages: read
+    uses: wyre-technology/.github/.github/workflows/mcp-server-ci.yml@8328fa348eefa317ce0e6b757279c61ae86f100c
+    secrets: inherit
