@@ -170,26 +170,13 @@ export class CippToolHandler {
         }
 
         case 'cipp_offboard_user': {
-          const {
-            tenantFilter,
-            userId,
-            revokePermissions,
-            disableUser,
-            resetPassword,
-            transferMailbox,
-          } = args as {
+          // Offboarding actions are named exactly as CIPP reads them, so the
+          // whole argument bag passes through untouched; the service selects
+          // the keys it recognises and rejects an empty action set.
+          const { tenantFilter, userId, ...offboardOptions } = args as {
             tenantFilter: string;
             userId: string;
-            revokePermissions?: boolean;
-            disableUser?: boolean;
-            resetPassword?: boolean;
-            transferMailbox?: string;
-          };
-          const offboardOptions: Record<string, unknown> = {};
-          if (revokePermissions !== undefined) offboardOptions.revokePermissions = revokePermissions;
-          if (disableUser !== undefined) offboardOptions.disableUser = disableUser;
-          if (resetPassword !== undefined) offboardOptions.resetPassword = resetPassword;
-          if (transferMailbox !== undefined) offboardOptions.transferMailbox = transferMailbox;
+          } & Record<string, unknown>;
           result = await this.cippService.offboardUser(tenantFilter, userId, offboardOptions);
           break;
         }
@@ -439,21 +426,23 @@ export class CippToolHandler {
         }
 
         case 'cipp_add_scheduled_item': {
-          const { taskName, command, scheduledTime, recurrence, tenantFilter } = args as {
-            taskName: string;
-            command: string;
-            scheduledTime: string;
-            recurrence?: string;
-            tenantFilter?: string;
-          };
-          const itemData: Record<string, unknown> = {
+          const { taskName, command, scheduledTime, recurrence, tenantFilter, parameters } =
+            args as {
+              taskName: string;
+              command: string;
+              scheduledTime: string;
+              recurrence?: string;
+              tenantFilter?: string;
+              parameters?: Record<string, unknown>;
+            };
+          result = await this.cippService.addScheduledItem({
             taskName,
             command,
             scheduledTime,
-          };
-          if (recurrence !== undefined) itemData.recurrence = recurrence;
-          if (tenantFilter !== undefined) itemData.tenantFilter = tenantFilter;
-          result = await this.cippService.addScheduledItem(itemData);
+            ...(recurrence !== undefined && { recurrence }),
+            ...(tenantFilter !== undefined && { tenantFilter }),
+            ...(parameters !== undefined && { parameters }),
+          });
           break;
         }
 

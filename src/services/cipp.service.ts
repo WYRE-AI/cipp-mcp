@@ -43,6 +43,101 @@ export interface DomainHealthCheck {
  */
 const DOMAIN_HEALTH_CHECK_TIMEOUT_MS = 15_000;
 
+/**
+ * CIPP's failure vocabulary as it appears inside a `Results` payload.
+ *
+ * Several CIPP entrypoints (`Invoke-EditUser`, `Invoke-AddScheduledItem`,
+ * `Invoke-ExecOffboardUser`) hardcode HTTP 200 and report failures as plain
+ * strings in `Results`, so a `response.ok` check alone reports success on
+ * failure.
+ */
+const CIPP_FAILURE_RE =
+  /fail|error|could not|unable|not permitted|already exists|does not exist/i;
+
+/**
+ * Normalise a CIPP `Results` payload — a string, an array, or absent — into
+ * strings, and flag the entries that report a failure. Parse, never assume.
+ */
+function interpretResults(raw: unknown): { results: string[]; failures: string[] } {
+  let entries: unknown[];
+  if (raw === undefined || raw === null) {
+    entries = [];
+  } else if (Array.isArray(raw)) {
+    entries = raw;
+  } else {
+    // AddScheduledItem returns a bare string where EditUser returns an array.
+    entries = [raw];
+  }
+
+  const results = entries.map((r) => (typeof r === 'string' ? r : JSON.stringify(r)));
+  return { results, failures: results.filter((r) => CIPP_FAILURE_RE.test(r)) };
+}
+
+/**
+ * Offboarding actions `Invoke-CIPPOffboardingJob` reads as booleans, in CIPP's
+ * own spelling. PowerShell property access is case-insensitive, but keeping
+ * upstream's casing keeps this list auditable against the `$Options.<name>`
+ * conditions it mirrors.
+ *
+ * `DisableOneDriveSharing` exists only on newer CIPP builds; older ones ignore
+ * it rather than failing.
+ */
+const OFFBOARD_BOOLEAN_ACTIONS = [
+  'ConvertToShared',
+  'HideFromGAL',
+  'removeCalendarInvites',
+  'removePermissions',
+  'removeCalendarPermissions',
+  'RemoveRules',
+  'RemoveMobile',
+  'RemoveGroups',
+  'RemoveLicenses',
+  'RevokeSessions',
+  'DisableSignIn',
+  'ClearImmutableId',
+  'ResetPass',
+  'RemoveMFADevices',
+  'RemoveTeamsPhoneDID',
+  'DeleteUser',
+  'DisableOneDriveSharing',
+  'disableForwarding',
+] as const;
+
+/** Offboarding actions read as arrays of UPNs granted access to the mailbox / OneDrive. */
+const OFFBOARD_COLLECTION_ACTIONS = ['AccessNoAutomap', 'AccessAutomap', 'OnedriveAccess'] as const;
+
+/**
+ * Convert an ISO 8601 datetime (or an already-epoch value) to Unix seconds.
+ *
+ * `Add-CIPPScheduledTask` casts with `[int64]$task.ScheduledTime`. An ISO
+ * string fails that cast and, because `Invoke-AddScheduledItem` has no
+ * try/catch, surfaces as an unhandled HTTP 500 rather than an API error.
+ */
+function toUnixSeconds(value: string): number {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `scheduledTime must be an ISO 8601 datetime (e.g. "2026-06-01T09:00:00Z") or Unix epoch seconds; got "${value}".`
+    );
+  }
+  return Math.floor(ms / 1000);
+}
+
+/** Arguments accepted by {@link CippService.addScheduledItem}. */
+export interface ScheduledItemInput {
+  taskName: string;
+  command: string;
+  scheduledTime: string;
+  recurrence?: string;
+  tenantFilter?: string;
+  parameters?: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -272,6 +367,11 @@ export class CippService {
    * List users within a tenant, with optional search filtering.
    * Calls the `ListUsers` Azure Function.
    *
+   * `Invoke-ListUsers` reads only `tenantFilter`, `UserID` and `graphFilter`
+   * from the query string — it has never read `searchField` / `searchValue`.
+   * Passing those through returned the entire tenant while appearing to
+   * filter, so search is translated into a Graph `$filter` instead.
+   *
    * @param tenantFilter - Tenant domain or identifier.
    * @param params       - Optional search parameters.
    * @param params.searchField - Azure AD attribute to search on (e.g. `displayName`).
@@ -281,10 +381,30 @@ export class CippService {
     tenantFilter: string,
     params?: { searchField?: string; searchValue?: string }
   ): Promise<T> {
-    return this.request<T>('GET', 'ListUsers', {
-      tenantFilter,
-      ...params,
-    });
+    const field = params?.searchField;
+    const value = params?.searchValue;
+
+    if ((field === undefined) !== (value === undefined)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'searchField and searchValue must be supplied together. Supplying one alone would silently return every user in the tenant.'
+      );
+    }
+
+    const query: Record<string, unknown> = { tenantFilter };
+    if (field && value) {
+      const escaped = value.replace(/'/g, "''");
+      // Exact match on the identity fields — a partial UPN or address is
+      // rarely what a caller means. displayName keeps prefix matching.
+      // Upstream issues the request with -ComplexFilter (ConsistencyLevel:
+      // eventual), so startsWith is supported.
+      query.graphFilter =
+        field === 'displayName'
+          ? `startsWith(${field}, '${escaped}')`
+          : `${field} eq '${escaped}'`;
+    }
+
+    return this.request<T>('GET', 'ListUsers', query);
   }
 
   /**
@@ -396,10 +516,7 @@ export class CippService {
 
     // Set-CIPPUser swallows its own exceptions and reports them as strings in
     // Results, so EditUser returns HTTP 200 on failure. Parse, never assume.
-    const results = (Array.isArray(response?.Results) ? response.Results : []).map((r) =>
-      typeof r === 'string' ? r : JSON.stringify(r)
-    );
-    const failures = results.filter((r) => /fail|error|could not|unable/i.test(r));
+    const { results, failures } = interpretResults(response?.Results);
 
     return {
       status: failures.length > 0 ? 'failed' : 'edited',
@@ -476,23 +593,91 @@ export class CippService {
   }
 
   /**
-   * Offboard a user, optionally applying additional cleanup actions.
+   * Offboard a user by queueing CIPP's offboarding job.
    * Calls the `ExecOffboardUser` Azure Function.
    *
+   * `Invoke-ExecOffboardUser` reads `$Request.Body.user.value` and hands every
+   * remaining body property to `Invoke-CIPPOffboardingJob` as its options
+   * object, so both the user list and the action names have to match CIPP
+   * exactly. The previous payload (`ID` plus four invented option names)
+   * matched nothing: newer CIPP rejects it with a 400, older CIPP returns
+   * HTTP 200 having queued a job that runs no actions at all.
+   *
+   * The result reports `queued`, never `offboarded` — CIPP returns success on
+   * task *creation* and never waits for the job to finish.
+   *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param userId       - Azure AD object ID of the user to offboard.
-   * @param options      - Optional offboarding actions (e.g. revokeSession, deleteUser).
+   * @param userId       - Object id or UPN of the user to offboard.
+   * @param options      - Offboarding actions, keyed by CIPP's own action names.
    */
   async offboardUser<T = unknown>(
     tenantFilter: string,
     userId: string,
     options?: Record<string, unknown>
   ): Promise<T> {
-    return this.request<T>('POST', 'ExecOffboardUser', undefined, {
+    // The offboarding tasks anchor Exchange and MFA operations on the UPN, so
+    // resolve an object id to the account's current UPN before queueing.
+    const identity = await this.resolveUserIdentity(tenantFilter, userId);
+    const opts = options ?? {};
+
+    const body: Record<string, unknown> = {
       tenantFilter,
-      ID: userId,
-      ...options,
-    });
+      // Read as `$Request.Body.user.value`. Older CIPP resolves nothing from
+      // bare UPN strings, so always send the { value } shape.
+      user: [{ value: identity.userPrincipalName }],
+    };
+    const actions: string[] = [];
+
+    for (const action of OFFBOARD_BOOLEAN_ACTIONS) {
+      if (opts[action] === true) {
+        body[action] = true;
+        actions.push(action);
+      }
+    }
+    for (const action of OFFBOARD_COLLECTION_ACTIONS) {
+      const value = opts[action];
+      if (Array.isArray(value) && value.length > 0) {
+        body[action] = value;
+        actions.push(action);
+      }
+    }
+    if (typeof opts.forward === 'string' && opts.forward.trim() !== '') {
+      // Read as `$Options.forward.value` — a bare string forwards to nothing.
+      body.forward = { value: opts.forward.trim() };
+      body.KeepCopy = opts.KeepCopy === true;
+      actions.push('forward');
+    }
+    if (typeof opts.OOO === 'string' && opts.OOO.trim() !== '') {
+      body.OOO = opts.OOO;
+      actions.push('OOO');
+    }
+
+    if (actions.length === 0) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'No offboarding actions were selected. CIPP queues the job and returns HTTP 200 either way, so an empty action set reports success while doing nothing. Enable at least one action (e.g. RemoveLicenses, DisableSignIn, RevokeSessions).'
+      );
+    }
+
+    const response = await this.request<{ Results?: unknown }>(
+      'POST',
+      'ExecOffboardUser',
+      undefined,
+      body
+    );
+    const { results, failures } = interpretResults(response?.Results);
+
+    return {
+      status: failures.length > 0 ? 'failed' : 'queued',
+      userPrincipalName: identity.userPrincipalName,
+      actions,
+      results,
+      failures,
+      message:
+        failures.length > 0
+          ? `CIPP returned HTTP 200 but reported failures queueing offboarding for ${identity.userPrincipalName}. Do NOT report success to the caller: ${failures.join(' | ')}`
+          : `Offboarding QUEUED for ${identity.userPrincipalName} in ${tenantFilter} with ${actions.length} action(s): ${actions.join(', ')}. CIPP reports success on task creation, not completion — confirm the outcome in CIPP's Offboarding view before telling the caller the account is offboarded.`,
+    } as T;
   }
 
   /**
@@ -617,11 +802,26 @@ export class CippService {
     upn: string,
     oooData: Record<string, unknown>
   ): Promise<T> {
-    return this.request<T>('POST', 'ExecSetOoO', undefined, {
+    // Invoke-ExecSetOoO reads `userId` and `AutoReplyState`, not
+    // `UserPrincipalName` / `enabled`. Both of the old keys resolved to $null
+    // upstream, so Set-CIPPOutOfOffice ran with no mailbox and no state and
+    // failed with a blank username in the error.
+    const body: Record<string, unknown> = {
       tenantFilter,
-      UserPrincipalName: upn,
-      ...oooData,
-    });
+      userId: upn,
+      AutoReplyState: oooData.enabled === true ? 'Enabled' : 'Disabled',
+    };
+
+    // CIPP applies a message only when it is non-empty, so the state can be
+    // flipped without wiping the existing text. Omitting is correct, not a gap.
+    if (typeof oooData.internalMessage === 'string' && oooData.internalMessage.trim() !== '') {
+      body.InternalMessage = oooData.internalMessage;
+    }
+    if (typeof oooData.externalMessage === 'string' && oooData.externalMessage.trim() !== '') {
+      body.ExternalMessage = oooData.externalMessage;
+    }
+
+    return this.request<T>('POST', 'ExecSetOoO', undefined, body);
   }
 
   /**
@@ -637,11 +837,52 @@ export class CippService {
     upn: string,
     forwardData: Record<string, unknown>
   ): Promise<T> {
-    return this.request<T>('POST', 'ExecEmailForward', undefined, {
+    const forwardTo =
+      typeof forwardData.forwardTo === 'string' ? forwardData.forwardTo.trim() : '';
+    const keepCopy = forwardData.keepCopy === true;
+
+    // Invoke-ExecEmailForward switches on `forwardOption` and assigns a status
+    // code only inside a matching branch. With none sent, no branch matched,
+    // $StatusCode stayed $null, and the PowerShell worker crashed building the
+    // response — an opaque 500 in every mode, not just disable. Note the
+    // lowercase key but capital-E `ExternalAddress` value; both are CIPP's.
+    // KeepCopy is compared against the string 'true' upstream.
+    const body: Record<string, unknown> = {
       tenantFilter,
-      UserPrincipalName: upn,
-      ...forwardData,
-    });
+      userID: upn,
+      KeepCopy: keepCopy ? 'true' : 'false',
+    };
+
+    if (!forwardTo) {
+      body.forwardOption = 'disabled';
+    } else {
+      const at = forwardTo.lastIndexOf('@');
+      if (at < 1) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `forwardTo must be a full email address (got "${forwardTo}"). Omit it entirely to disable forwarding.`
+        );
+      }
+      // CIPP models internal and external forwarding as different Exchange
+      // properties, so the mode is derived from whether the target sits on one
+      // of the tenant's own domains. Costs one ListDomains GET on the set path
+      // only; disabling skips it.
+      const domain = forwardTo.slice(at + 1).toLowerCase();
+      const domains = await this.listDomains<Array<{ id?: string }>>(tenantFilter);
+      const isInternal = (Array.isArray(domains) ? domains : []).some(
+        (d) => typeof d?.id === 'string' && d.id.toLowerCase() === domain
+      );
+
+      if (isInternal) {
+        body.forwardOption = 'internalAddress';
+        body.ForwardInternal = { value: forwardTo };
+      } else {
+        body.forwardOption = 'ExternalAddress';
+        body.ForwardExternal = forwardTo;
+      }
+    }
+
+    return this.request<T>('POST', 'ExecEmailForward', undefined, body);
   }
 
   // -------------------------------------------------------------------------
@@ -932,10 +1173,44 @@ export class CippService {
    * Add a new scheduled item (recurring job) to CIPP.
    * Calls the `AddScheduledItem` Azure Function.
    *
-   * @param itemData - Scheduled item properties (name, recurrence, taskInfo, etc.).
+   * Three upstream contracts drive the mapping here: `Add-CIPPScheduledTask`
+   * stores `$task.Name` (not `taskName`), casts `ScheduledTime` with
+   * `[int64]` (so an ISO string throws into an unhandled 500), and *returns*
+   * error strings rather than throwing for blocked/unknown/duplicate commands
+   * — which `Invoke-AddScheduledItem` then serves with a hardcoded HTTP 200.
+   *
+   * @param itemData - Scheduled item properties.
    */
-  async addScheduledItem<T = unknown>(itemData: Record<string, unknown>): Promise<T> {
-    return this.request<T>('POST', 'AddScheduledItem', undefined, itemData);
+  async addScheduledItem<T = unknown>(itemData: ScheduledItemInput): Promise<T> {
+    const body: Record<string, unknown> = {
+      Name: itemData.taskName,
+      // Older CIPP stores `[string]$task.Command.value` with no bare-string
+      // fallback, so always send the { value } shape.
+      Command: { value: itemData.command },
+      ScheduledTime: toUnixSeconds(itemData.scheduledTime),
+    };
+    if (itemData.recurrence !== undefined) body.Recurrence = itemData.recurrence;
+    if (itemData.tenantFilter !== undefined) body.TenantFilter = itemData.tenantFilter;
+    if (itemData.parameters !== undefined) body.Parameters = itemData.parameters;
+
+    const response = await this.request<{ Results?: unknown }>(
+      'POST',
+      'AddScheduledItem',
+      undefined,
+      body
+    );
+    const { results, failures } = interpretResults(response?.Results);
+
+    return {
+      status: failures.length > 0 ? 'failed' : 'added',
+      taskName: itemData.taskName,
+      results,
+      failures,
+      message:
+        failures.length > 0
+          ? `CIPP returned HTTP 200 but reported a failure adding scheduled task "${itemData.taskName}". Do NOT report success to the caller: ${failures.join(' | ')}`
+          : `Scheduled task "${itemData.taskName}" added.`,
+    } as T;
   }
 
   // -------------------------------------------------------------------------
