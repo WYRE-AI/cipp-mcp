@@ -103,6 +103,27 @@ Add to your `claude_desktop_config.json`:
 | Scheduler | list_scheduled_items, add_scheduled_item |
 | Core | ping, get_version, list_logs |
 
+### CIPP version compatibility
+
+Request bodies are shaped against CIPP's own `Invoke-*.ps1` handlers and are
+written to satisfy both current and older CIPP builds — where the two differ,
+the server sends the form both accept. Three behaviours are worth knowing:
+
+- **`offboard_user` reports queued, not completed.** CIPP's `ExecOffboardUser`
+  returns HTTP 200 the instant the job is created; it never waits for or reports
+  the offboarding result. Confirm the outcome in CIPP's Offboarding view before
+  treating an account as offboarded. The tool refuses a call with no actions
+  selected, since that would otherwise queue a job that succeeds while doing
+  nothing.
+- **Some endpoints report failure under HTTP 200.** `EditUser`,
+  `AddScheduledItem` and `ExecOffboardUser` return error text in `Results`
+  rather than an error status. These tools parse `Results` and return
+  `status: "failed"`; do not treat a 200 as success.
+- **Two parameters need a recent CIPP.** `offboard_user`'s
+  `DisableOneDriveSharing` and `set_out_of_office`'s `timezone` are ignored by
+  older builds rather than erroring — so an offboarding that selects *only*
+  `DisableOneDriveSharing` will run no actions on an older CIPP.
+
 ## Authentication Setup
 
 CIPP's API Client Management page provisions an Entra ID app registration and

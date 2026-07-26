@@ -3,7 +3,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { CippService } from '../services/cipp.service.js';
+import { CippService, OutOfOfficeInput } from '../services/cipp.service.js';
 import { Logger } from '../utils/logger.js';
 import { TOOL_DEFINITIONS } from '../mcp/tool.definitions.js';
 
@@ -255,16 +255,14 @@ export class CippToolHandler {
         }
 
         case 'cipp_set_out_of_office': {
-          const { tenantFilter, upn, enabled, internalMessage, externalMessage } = args as {
+          // The optional fields are named as the service expects, so they pass
+          // through as-is. The cast reflects the declared schema; the service
+          // validates `state` at runtime and rejects scheduled-only fields
+          // supplied for any other state.
+          const { tenantFilter, upn, ...oooData } = args as unknown as {
             tenantFilter: string;
             upn: string;
-            enabled: boolean;
-            internalMessage?: string;
-            externalMessage?: string;
-          };
-          const oooData: Record<string, unknown> = { enabled };
-          if (internalMessage !== undefined) oooData.internalMessage = internalMessage;
-          if (externalMessage !== undefined) oooData.externalMessage = externalMessage;
+          } & OutOfOfficeInput;
           result = await this.cippService.setOutOfOffice(tenantFilter, upn, oooData);
           break;
         }

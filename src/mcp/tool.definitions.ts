@@ -612,22 +612,64 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           type: 'string',
           description: 'User Principal Name of the mailbox to configure.',
         },
-        enabled: {
-          type: 'boolean',
-          description: 'Set to true to enable the auto-reply, or false to disable it.',
+        state: {
+          type: 'string',
+          enum: ['Enabled', 'Disabled', 'Scheduled'],
+          description:
+            "Auto-reply state. 'Scheduled' replies only between startTime and endTime — useful during offboarding.",
         },
         internalMessage: {
           type: 'string',
           description:
-            'HTML or plain-text auto-reply message sent to senders within the same organisation.',
+            'HTML or plain-text auto-reply message sent to senders within the same organisation. Omit to leave the existing message untouched.',
         },
         externalMessage: {
           type: 'string',
           description:
-            'HTML or plain-text auto-reply message sent to senders outside the organisation.',
+            'HTML or plain-text auto-reply message sent to senders outside the organisation. Omit to leave the existing message untouched.',
+        },
+        startTime: {
+          type: 'string',
+          description:
+            "When the scheduled auto-reply starts — ISO 8601 datetime or Unix epoch seconds. Only valid when state is 'Scheduled'; CIPP defaults to now if omitted.",
+        },
+        endTime: {
+          type: 'string',
+          description:
+            "When the scheduled auto-reply ends — ISO 8601 datetime or Unix epoch seconds. Only valid when state is 'Scheduled'; CIPP defaults to 7 days after startTime if omitted.",
+        },
+        timezone: {
+          type: 'string',
+          description:
+            "Timezone the schedule is interpreted in (e.g. 'Eastern Standard Time'). Requires a recent CIPP build; older ones ignore it.",
+        },
+        createOOFEvent: {
+          type: 'boolean',
+          description:
+            "Create a calendar event covering the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        oofEventSubject: {
+          type: 'string',
+          description:
+            "Subject line for the calendar event created by createOOFEvent. Only valid when state is 'Scheduled'.",
+        },
+        autoDeclineFutureRequestsWhenOOF: {
+          type: 'boolean',
+          description:
+            "Automatically decline meeting requests that arrive for the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        declineEventsForScheduledOOF: {
+          type: 'boolean',
+          description:
+            "Decline existing meetings that fall inside the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        declineMeetingMessage: {
+          type: 'string',
+          description:
+            "Message sent when a meeting is declined. Only valid when state is 'Scheduled'.",
         },
       },
-      required: ['tenantFilter', 'upn', 'enabled'],
+      required: ['tenantFilter', 'upn', 'state'],
     },
   },
   {

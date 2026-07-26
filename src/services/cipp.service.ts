@@ -109,11 +109,16 @@ const OFFBOARD_COLLECTION_ACTIONS = ['AccessNoAutomap', 'AccessAutomap', 'Onedri
 /**
  * Convert an ISO 8601 datetime (or an already-epoch value) to Unix seconds.
  *
- * `Add-CIPPScheduledTask` casts with `[int64]$task.ScheduledTime`. An ISO
- * string fails that cast and, because `Invoke-AddScheduledItem` has no
- * try/catch, surfaces as an unhandled HTTP 500 rather than an API error.
+ * Both callers need this. `Add-CIPPScheduledTask` casts with
+ * `[int64]$task.ScheduledTime` — an ISO string fails that cast and, because
+ * `Invoke-AddScheduledItem` has no try/catch, surfaces as an unhandled HTTP
+ * 500. `Invoke-ExecSetOoO` takes either, converting only when the value
+ * matches `^\d+$`, so epoch is the unambiguous form to send.
+ *
+ * @param value - ISO 8601 datetime or Unix epoch seconds.
+ * @param field - Parameter name, used only to make the error actionable.
  */
-function toUnixSeconds(value: string): number {
+function toUnixSeconds(value: string, field: string): number {
   const trimmed = value.trim();
   if (/^\d+$/.test(trimmed)) {
     return Number(trimmed);
@@ -122,10 +127,54 @@ function toUnixSeconds(value: string): number {
   if (Number.isNaN(ms)) {
     throw new McpError(
       ErrorCode.InvalidParams,
-      `scheduledTime must be an ISO 8601 datetime (e.g. "2026-06-01T09:00:00Z") or Unix epoch seconds; got "${value}".`
+      `${field} must be an ISO 8601 datetime (e.g. "2026-06-01T09:00:00Z") or Unix epoch seconds; got "${value}".`
     );
   }
   return Math.floor(ms / 1000);
+}
+
+/** True when `value` is a string carrying something other than whitespace. */
+function nonEmpty(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/** Auto-reply states `Set-CIPPOutOfOffice` accepts (its own ValidateSet). */
+const OOO_STATES = ['Enabled', 'Disabled', 'Scheduled'] as const;
+type OutOfOfficeState = (typeof OOO_STATES)[number];
+
+/**
+ * Out-of-office fields `Invoke-ExecSetOoO` reads only inside its
+ * `if ($State -eq 'Scheduled')` branch. Supplying them for any other state is
+ * rejected rather than silently dropped — a caller passing a window clearly
+ * meant to schedule.
+ *
+ * `timezone` is deliberately absent: upstream applies it outside that branch.
+ */
+const OOO_SCHEDULED_ONLY_FIELDS = [
+  'startTime',
+  'endTime',
+  'createOOFEvent',
+  'oofEventSubject',
+  'autoDeclineFutureRequestsWhenOOF',
+  'declineEventsForScheduledOOF',
+  'declineMeetingMessage',
+] as const;
+
+/** Arguments accepted by {@link CippService.setOutOfOffice}. */
+export interface OutOfOfficeInput {
+  state: OutOfOfficeState;
+  internalMessage?: string;
+  externalMessage?: string;
+  /** Newer CIPP only; older builds ignore it. */
+  timezone?: string;
+  // Scheduled-only below.
+  startTime?: string;
+  endTime?: string;
+  createOOFEvent?: boolean;
+  oofEventSubject?: string;
+  autoDeclineFutureRequestsWhenOOF?: boolean;
+  declineEventsForScheduledOOF?: boolean;
+  declineMeetingMessage?: string;
 }
 
 /** Arguments accepted by {@link CippService.addScheduledItem}. */
@@ -641,13 +690,13 @@ export class CippService {
         actions.push(action);
       }
     }
-    if (typeof opts.forward === 'string' && opts.forward.trim() !== '') {
+    if (nonEmpty(opts.forward)) {
       // Read as `$Options.forward.value` — a bare string forwards to nothing.
       body.forward = { value: opts.forward.trim() };
       body.KeepCopy = opts.KeepCopy === true;
       actions.push('forward');
     }
-    if (typeof opts.OOO === 'string' && opts.OOO.trim() !== '') {
+    if (nonEmpty(opts.OOO)) {
       body.OOO = opts.OOO;
       actions.push('OOO');
     }
@@ -800,8 +849,31 @@ export class CippService {
   async setOutOfOffice<T = unknown>(
     tenantFilter: string,
     upn: string,
-    oooData: Record<string, unknown>
+    oooData: OutOfOfficeInput
   ): Promise<T> {
+    const state = oooData.state;
+    if (!OOO_STATES.includes(state)) {
+      // Also catches a stale caller still sending the old boolean `enabled`.
+      // Failing loudly beats defaulting, which would silently disable the
+      // auto-reply for someone who asked to turn it on.
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `state must be one of ${OOO_STATES.map((s) => `"${s}"`).join(', ')} (got ${JSON.stringify(
+          state
+        )}). The boolean "enabled" parameter was replaced by "state" because it could not express a scheduled auto-reply.`
+      );
+    }
+
+    if (state !== 'Scheduled') {
+      const stray = OOO_SCHEDULED_ONLY_FIELDS.filter((f) => oooData[f] !== undefined);
+      if (stray.length > 0) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `${stray.join(', ')} only applies when state is "Scheduled"; CIPP ignores these for state "${state}". Set state to "Scheduled" or drop them.`
+        );
+      }
+    }
+
     // Invoke-ExecSetOoO reads `userId` and `AutoReplyState`, not
     // `UserPrincipalName` / `enabled`. Both of the old keys resolved to $null
     // upstream, so Set-CIPPOutOfOffice ran with no mailbox and no state and
@@ -809,16 +881,45 @@ export class CippService {
     const body: Record<string, unknown> = {
       tenantFilter,
       userId: upn,
-      AutoReplyState: oooData.enabled === true ? 'Enabled' : 'Disabled',
+      AutoReplyState: state,
     };
 
     // CIPP applies a message only when it is non-empty, so the state can be
     // flipped without wiping the existing text. Omitting is correct, not a gap.
-    if (typeof oooData.internalMessage === 'string' && oooData.internalMessage.trim() !== '') {
-      body.InternalMessage = oooData.internalMessage;
-    }
-    if (typeof oooData.externalMessage === 'string' && oooData.externalMessage.trim() !== '') {
-      body.ExternalMessage = oooData.externalMessage;
+    if (nonEmpty(oooData.internalMessage)) body.InternalMessage = oooData.internalMessage;
+    if (nonEmpty(oooData.externalMessage)) body.ExternalMessage = oooData.externalMessage;
+    // Applied by upstream for every state, not just Scheduled. Newer CIPP only.
+    if (nonEmpty(oooData.timezone)) body.timezone = oooData.timezone;
+
+    if (state === 'Scheduled') {
+      // Upstream converts a `^\d+$` value via FromUnixTimeSeconds and otherwise
+      // passes the string through to Exchange, so epoch is the unambiguous form.
+      const startTime =
+        oooData.startTime !== undefined ? toUnixSeconds(oooData.startTime, 'startTime') : undefined;
+      const endTime =
+        oooData.endTime !== undefined ? toUnixSeconds(oooData.endTime, 'endTime') : undefined;
+
+      if (startTime !== undefined && endTime !== undefined && endTime <= startTime) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `endTime (${oooData.endTime}) must be after startTime (${oooData.startTime}).`
+        );
+      }
+      if (startTime !== undefined) body.StartTime = startTime;
+      if (endTime !== undefined) body.EndTime = endTime;
+
+      if (oooData.createOOFEvent !== undefined) body.CreateOOFEvent = oooData.createOOFEvent;
+      if (nonEmpty(oooData.oofEventSubject)) body.OOFEventSubject = oooData.oofEventSubject;
+      if (oooData.autoDeclineFutureRequestsWhenOOF !== undefined) {
+        body.AutoDeclineFutureRequestsWhenOOF = oooData.autoDeclineFutureRequestsWhenOOF;
+      }
+      // Upstream fans this one out to DeclineAllEventsForScheduledOOF too.
+      if (oooData.declineEventsForScheduledOOF !== undefined) {
+        body.DeclineEventsForScheduledOOF = oooData.declineEventsForScheduledOOF;
+      }
+      if (nonEmpty(oooData.declineMeetingMessage)) {
+        body.DeclineMeetingMessage = oooData.declineMeetingMessage;
+      }
     }
 
     return this.request<T>('POST', 'ExecSetOoO', undefined, body);
@@ -1187,7 +1288,7 @@ export class CippService {
       // Older CIPP stores `[string]$task.Command.value` with no bare-string
       // fallback, so always send the { value } shape.
       Command: { value: itemData.command },
-      ScheduledTime: toUnixSeconds(itemData.scheduledTime),
+      ScheduledTime: toUnixSeconds(itemData.scheduledTime, 'scheduledTime'),
     };
     if (itemData.recurrence !== undefined) body.Recurrence = itemData.recurrence;
     if (itemData.tenantFilter !== undefined) body.TenantFilter = itemData.tenantFilter;
