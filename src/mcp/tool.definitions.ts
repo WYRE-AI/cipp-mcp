@@ -102,7 +102,7 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
         searchValue: {
           type: 'string',
           description:
-            'Value to match against the chosen searchField. Supports partial string matching.',
+            'Value to match against the chosen searchField. displayName matches on prefix; userPrincipalName and mail must match exactly. Omit both search parameters to list every user in the tenant.',
         },
       },
       required: ['tenantFilter'],
@@ -312,9 +312,11 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: 'cipp_offboard_user',
     description:
-      '⚠ DESTRUCTIVE — IRREVERSIBLE. Completely offboards a user by disabling ' +
-      'their account, revoking sessions, removing group memberships, and optionally ' +
-      'transferring data. This comprehensive action cannot be easily undone. Confirm with the user before invoking.',
+      '⚠ DESTRUCTIVE — IRREVERSIBLE. Queues CIPP\'s offboarding job for a user. ' +
+      'Every action is opt-in: at least one must be enabled or the call is rejected. ' +
+      'Returns once the job is QUEUED — CIPP reports success on task creation, not ' +
+      'completion, so confirm the outcome in CIPP\'s Offboarding view before ' +
+      'reporting the account as offboarded. Confirm with the user before invoking.',
     annotations: {
       title: 'Offboard user (irreversible)',
       readOnlyHint: false,
@@ -327,25 +329,115 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       properties: {
         tenantFilter: TENANT_FILTER_PROP,
         userId: USER_ID_PROP,
-        revokePermissions: {
+        DisableSignIn: {
+          type: 'boolean',
+          description: 'Disable the account so the user can no longer sign in.',
+        },
+        RevokeSessions: {
+          type: 'boolean',
+          description: 'Revoke all active sign-in sessions and refresh tokens.',
+        },
+        ResetPass: {
+          type: 'boolean',
+          description: 'Reset the account password to a new random value.',
+        },
+        RemoveLicenses: {
+          type: 'boolean',
+          description: 'Remove every license assigned to the user.',
+        },
+        RemoveGroups: {
+          type: 'boolean',
+          description: 'Remove the user from all groups they are a member of.',
+        },
+        RemoveMFADevices: {
+          type: 'boolean',
+          description: 'Remove all registered MFA methods for the user.',
+        },
+        RemoveMobile: {
+          type: 'boolean',
+          description: 'Remove the user\'s registered mobile devices.',
+        },
+        RemoveRules: {
+          type: 'boolean',
+          description: 'Remove all inbox rules from the mailbox.',
+        },
+        RemoveTeamsPhoneDID: {
+          type: 'boolean',
+          description: 'Release the Teams phone number (DID) assigned to the user.',
+        },
+        removeCalendarInvites: {
+          type: 'boolean',
+          description: 'Cancel calendar invites the user organised.',
+        },
+        removePermissions: {
           type: 'boolean',
           description:
-            'When true, removes the user from all groups and strips delegated mailbox and SharePoint permissions.',
+            "Remove the user's delegated access to other mailboxes across the tenant.",
         },
-        disableUser: {
+        removeCalendarPermissions: {
           type: 'boolean',
           description:
-            'When true, disables the Azure AD account so the user can no longer sign in.',
+            "Remove the user's permissions on other users' calendars across the tenant.",
         },
-        resetPassword: {
+        ConvertToShared: {
           type: 'boolean',
           description:
-            'When true, resets the account password as part of the offboarding flow.',
+            'Convert the mailbox to a shared mailbox so it can be retained without a license.',
         },
-        transferMailbox: {
+        HideFromGAL: {
+          type: 'boolean',
+          description: 'Hide the mailbox from the Global Address List.',
+        },
+        disableForwarding: {
+          type: 'boolean',
+          description: 'Remove any existing forwarding configured on the mailbox.',
+        },
+        DisableOneDriveSharing: {
+          type: 'boolean',
+          description:
+            "Revoke sharing links on the user's OneDrive. Requires a recent CIPP build; older ones ignore it.",
+        },
+        ClearImmutableId: {
+          type: 'boolean',
+          description:
+            'Clear the immutable ID, breaking the link to an on-premises AD object.',
+        },
+        DeleteUser: {
+          type: 'boolean',
+          description:
+            '⚠ Delete the account outright. Do not combine with actions that need the account to exist afterwards.',
+        },
+        forward: {
           type: 'string',
           description:
-            'UPN of the recipient who should receive the offboarded mailbox contents via a mailbox export / auto-forward. Omit to skip mailbox transfer.',
+            "UPN to forward the user's incoming mail to. Omit to leave forwarding unchanged.",
+        },
+        KeepCopy: {
+          type: 'boolean',
+          description:
+            'When forwarding, keep a copy of each message in the original mailbox. Only meaningful alongside forward.',
+        },
+        OOO: {
+          type: 'string',
+          description:
+            'Out-of-office auto-reply message to set on the mailbox. Omit to leave the auto-reply unchanged.',
+        },
+        AccessAutomap: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            "UPNs to grant full access to the user's mailbox, automapped into their Outlook.",
+        },
+        AccessNoAutomap: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            "UPNs to grant full access to the user's mailbox without automapping.",
+        },
+        OnedriveAccess: {
+          type: 'array',
+          items: { type: 'string' },
+          description: "UPNs to grant access to the user's OneDrive.",
         },
       },
       required: ['tenantFilter', 'userId'],
@@ -520,22 +612,64 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           type: 'string',
           description: 'User Principal Name of the mailbox to configure.',
         },
-        enabled: {
-          type: 'boolean',
-          description: 'Set to true to enable the auto-reply, or false to disable it.',
+        state: {
+          type: 'string',
+          enum: ['Enabled', 'Disabled', 'Scheduled'],
+          description:
+            "Auto-reply state. 'Scheduled' replies only between startTime and endTime — useful during offboarding.",
         },
         internalMessage: {
           type: 'string',
           description:
-            'HTML or plain-text auto-reply message sent to senders within the same organisation.',
+            'HTML or plain-text auto-reply message sent to senders within the same organisation. Omit to leave the existing message untouched.',
         },
         externalMessage: {
           type: 'string',
           description:
-            'HTML or plain-text auto-reply message sent to senders outside the organisation.',
+            'HTML or plain-text auto-reply message sent to senders outside the organisation. Omit to leave the existing message untouched.',
+        },
+        startTime: {
+          type: 'string',
+          description:
+            "When the scheduled auto-reply starts — ISO 8601 datetime or Unix epoch seconds. Only valid when state is 'Scheduled'; CIPP defaults to now if omitted.",
+        },
+        endTime: {
+          type: 'string',
+          description:
+            "When the scheduled auto-reply ends — ISO 8601 datetime or Unix epoch seconds. Only valid when state is 'Scheduled'; CIPP defaults to 7 days after startTime if omitted.",
+        },
+        timezone: {
+          type: 'string',
+          description:
+            "Timezone the schedule is interpreted in (e.g. 'Eastern Standard Time'). Requires a recent CIPP build; older ones ignore it.",
+        },
+        createOOFEvent: {
+          type: 'boolean',
+          description:
+            "Create a calendar event covering the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        oofEventSubject: {
+          type: 'string',
+          description:
+            "Subject line for the calendar event created by createOOFEvent. Only valid when state is 'Scheduled'.",
+        },
+        autoDeclineFutureRequestsWhenOOF: {
+          type: 'boolean',
+          description:
+            "Automatically decline meeting requests that arrive for the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        declineEventsForScheduledOOF: {
+          type: 'boolean',
+          description:
+            "Decline existing meetings that fall inside the out-of-office window. Only valid when state is 'Scheduled'.",
+        },
+        declineMeetingMessage: {
+          type: 'string',
+          description:
+            "Message sent when a meeting is declined. Only valid when state is 'Scheduled'.",
         },
       },
-      required: ['tenantFilter', 'upn', 'enabled'],
+      required: ['tenantFilter', 'upn', 'state'],
     },
   },
   {
@@ -883,7 +1017,7 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
         scheduledTime: {
           type: 'string',
           description:
-            'ISO 8601 datetime string specifying when the task should first run (e.g. "2024-06-01T09:00:00Z").',
+            'When the task should first run — an ISO 8601 datetime (e.g. "2026-06-01T09:00:00Z") or Unix epoch seconds. Converted to epoch seconds before it is sent to CIPP.',
         },
         recurrence: {
           type: 'string',
@@ -894,6 +1028,12 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           type: 'string',
           description:
             "Optional tenant domain name or ID to scope the scheduled task. Use 'allTenants' to run across every managed tenant.",
+        },
+        parameters: {
+          type: 'object',
+          description:
+            'Arguments passed to the scheduled command, keyed by parameter name. Omit only when the command genuinely takes no arguments — without it the command runs bare.',
+          additionalProperties: true,
         },
       },
       required: ['taskName', 'command', 'scheduledTime'],
