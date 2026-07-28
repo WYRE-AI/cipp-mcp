@@ -15,6 +15,13 @@ import { Logger } from '../utils/logger.js';
 import { McpServerConfig } from '../types/index.js';
 import { EnvironmentConfig, parseCredentialsFromHeaders } from '../utils/config.js';
 import { CippToolHandler } from '../handlers/tool.handler.js';
+import { verifyS2sHeader, S2S_HEADER } from '../s2s-verify.js';
+
+// Conduit service-to-service auth (gateway#377 parity). Non-empty =
+// enforce X-Gateway-S2S on every /mcp request; empty = disabled, behavior
+// exactly as before (dark-by-default until the gateway provisions this
+// container's derived subkey). See src/s2s-verify.ts.
+const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || '';
 
 export class CippMcpServer {
   private server: Server;
@@ -164,6 +171,20 @@ Tool categories:
       }
 
       if (url.pathname === '/mcp') {
+        // Conduit service-to-service auth (gateway#377 parity): rejected
+        // BEFORE any credential extraction (OAuth or static key), mirroring
+        // every other ported wrapper (e.g.
+        // containers/sentinelone-mcp/gateway_wrapper.py).
+        if (S2S_SECRET && !verifyS2sHeader(req.headers[S2S_HEADER] as string | undefined, S2S_SECRET)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: 'Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.',
+            })
+          );
+          return;
+        }
+
         if (req.method !== 'POST') {
           res.writeHead(405, { 'Content-Type': 'application/json' });
           res.end(
