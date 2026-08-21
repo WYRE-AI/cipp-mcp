@@ -22,7 +22,7 @@ jobs:
       packages: write
       id-token: write
       security-events: write
-    uses: wyre-technology/.github/.github/workflows/mcp-server-release.yml@d28a612a00a1bd0c36aff09e686ce2d1e10ef552
+    uses: wyre-technology/.github/.github/workflows/mcp-server-release.yml@8bfc9b3a249fd1e6f69f1d05c45c8eaf3076fec3
     with:
       server-name: cipp-mcp
       image-name: ghcr.io/wyre-technology/cipp-mcp
@@ -34,7 +34,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    uses: wyre-technology/.github/.github/workflows/mcp-server-deploy.yml@a61021de876d0fd44dac777fa90f963fea25b0c3
+    uses: wyre-technology/.github/.github/workflows/mcp-server-deploy.yml@198605d0575e27374cf9b67fba3aa8c7b91de2c0
     with:
       vendor-slug: cipp
       image-name: ghcr.io/wyre-technology/cipp-mcp
