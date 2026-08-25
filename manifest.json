@@ -11,9 +11,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/wyre-technology/cipp-mcp"
+    "url": "https://github.com/WYRE-AI/cipp-mcp"
   },
-  "homepage": "https://github.com/wyre-technology/cipp-mcp",
+  "homepage": "https://github.com/WYRE-AI/cipp-mcp",
   "license": "Apache-2.0",
   "keywords": ["cipp", "m365", "microsoft365", "msp", "multi-tenant", "azure"],
   "server": {
