@@ -31,7 +31,7 @@ npx cipp-mcp
 ### From source
 
 ```sh
-git clone https://github.com/wyre-technology/cipp-mcp
+git clone https://github.com/WYRE-AI/cipp-mcp
 cd cipp-mcp
 npm install
 npm run build

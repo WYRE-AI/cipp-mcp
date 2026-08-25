@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wyre-technology/cipp-mcp",
+  "name": "io.github.WYRE-AI/cipp-mcp",
   "title": "CIPP",
   "description": "MCP server for CIPP — M365 multi-tenant management for MSPs (users, tenants, policies).",
   "repository": {
-    "url": "https://github.com/wyre-technology/cipp-mcp",
+    "url": "https://github.com/WYRE-AI/cipp-mcp",
     "source": "github"
   },
   "version": "0.0.0",
-  "websiteUrl": "https://github.com/wyre-technology/cipp-mcp",
+  "websiteUrl": "https://github.com/WYRE-AI/cipp-mcp",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wyre-technology/cipp-mcp:0.0.0",
+      "identifier": "ghcr.io/wyre-ai/cipp-mcp:0.0.0",
       "transport": {
         "type": "stdio"
       },
