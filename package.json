@@ -37,7 +37,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "winston": "^3.11.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.1"
   },
   "devDependencies": {
     "@anthropic-ai/mcpb": "^2.1.2",
