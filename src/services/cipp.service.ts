@@ -1143,6 +1143,20 @@ export class CippService {
     tenantFilter: string,
     upnOrId: string
   ): Promise<MailboxUsageReport> {
+    // `Invoke-ListUserMailboxDetails` reads a single tenant; it has no
+    // all-tenants branch. Left to run, the call would first fan `ListUsers`
+    // out across every managed tenant and then ask for one mailbox against a
+    // tenantFilter upstream cannot resolve — slow, and wrong in a way that
+    // reads like a CIPP fault. Reject it here, as the other tools do.
+    if (tenantFilter.trim().toLowerCase() === 'alltenants') {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'cipp_get_mailbox_usage reads one mailbox in one tenant; allTenants is not supported. ' +
+          "Name the mailbox's own tenant, or use cipp_list_mailbox_usage, which does support " +
+          'AllTenants.'
+      );
+    }
+
     // The endpoint keys off the Entra object id — a UPN in `UserID` returns an
     // empty shell rather than an error, so resolve before asking.
     const identity = await this.resolveUserIdentity(

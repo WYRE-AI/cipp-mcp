@@ -429,6 +429,24 @@ describe('CippService getMailboxUsage', () => {
     expect(result.archive).not.toHaveProperty('itemCount');
   });
 
+  // Upstream has no all-tenants branch for this endpoint, so letting the call
+  // through would fan ListUsers across every tenant and then ask for a mailbox
+  // against a tenantFilter CIPP cannot resolve.
+  it.each(['allTenants', 'AllTenants', '  alltenants  '])(
+    'rejects tenantFilter %p instead of fanning out across every tenant',
+    async (tenantFilter) => {
+      const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(() =>
+        Promise.resolve(jsonResponse([]))
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(svc.getMailboxUsage(tenantFilter, 'alice@contoso.com')).rejects.toThrow(
+        /allTenants is not supported[\s\S]*cipp_list_mailbox_usage/i
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
   it('explains an unresolvable user in read terms, not edit terms', async () => {
     global.fetch = jest.fn<Promise<Response>, [string, RequestInit]>(() =>
       Promise.resolve(jsonResponse([]))
