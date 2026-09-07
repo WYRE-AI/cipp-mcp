@@ -6,6 +6,7 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { Logger } from '../utils/logger.js';
 import { TokenProvider } from './token.service.js';
+import { toBytes, formatBytes, percentOfQuota, fromGigabytes, GIB } from '../utils/bytes.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -185,6 +186,214 @@ export interface ScheduledItemInput {
   recurrence?: string;
   tenantFilter?: string;
   parameters?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox usage
+// ---------------------------------------------------------------------------
+
+/** Normalised size figures for a primary mailbox or an online archive. */
+export interface MailboxSizeReport {
+  /** Bytes consumed. Absent when the source reported no usable figure. */
+  bytes?: number;
+  /** `bytes` rendered for humans, e.g. `"12.30 GB"`. */
+  size?: string;
+  itemCount?: number;
+  quotaBytes?: number;
+  quota?: string;
+  /** Percentage of the quota consumed. Absent when the quota is unknown or unlimited. */
+  percentOfQuota?: number;
+}
+
+/** A mailbox's online archive, which may not exist at all. */
+export interface ArchiveSizeReport extends MailboxSizeReport {
+  enabled: boolean;
+  autoExpanding?: boolean;
+}
+
+/** Per-mailbox usage as returned by the usage tools. */
+export interface MailboxUsageRow {
+  userPrincipalName?: string;
+  displayName?: string;
+  recipientTypeDetails?: string;
+  /** Only present for an `AllTenants` query. */
+  tenant?: string;
+  mailbox: MailboxSizeReport;
+  archive: ArchiveSizeReport;
+}
+
+/** Orderings `listMailboxUsage` can sort by, largest first. */
+const MAILBOX_USAGE_SORTS = ['mailboxSize', 'archiveSize', 'totalSize', 'percentOfQuota'] as const;
+type MailboxUsageSort = (typeof MAILBOX_USAGE_SORTS)[number];
+
+/** Default page size for `listMailboxUsage`. A whole-tenant dump blows the tool-result limit. */
+const MAILBOX_USAGE_DEFAULT_LIMIT = 50;
+const MAILBOX_USAGE_MAX_LIMIT = 1000;
+
+/**
+ * Message `Get-CIPPMailboxesReport` throws when the reporting database has
+ * never been synced for the tenant. `Invoke-ListMailboxes` serves it as the
+ * body of an HTTP 500, so it reaches us inside the generic request error.
+ */
+const REPORT_DB_UNSYNCED_RE = /No mailbox data found in reporting database/i;
+
+/**
+ * A UPN replaced by a 32-character hex hash. Microsoft 365 substitutes these
+ * throughout the usage reports when "conceal user, group, and site names" is
+ * enabled in the admin centre, which also breaks CIPP's join between the
+ * report and the mailbox list — see {@link summariseMailboxUsage}.
+ */
+const CONCEALED_NAME_RE = /^[0-9A-F]{32}$/i;
+
+/** Percent-of-quota at which a mailbox is worth flagging in the summary. */
+const NEAR_QUOTA_PERCENT = 90;
+
+/** Build the normalised size block shared by primary mailboxes and archives. */
+function sizeReport(
+  bytes: number | undefined,
+  quotaBytes: number | undefined,
+  itemCount: number | undefined
+): MailboxSizeReport {
+  const percent = percentOfQuota(bytes, quotaBytes);
+  return {
+    ...(bytes !== undefined && { bytes, size: formatBytes(bytes) }),
+    ...(itemCount !== undefined && { itemCount }),
+    ...(quotaBytes !== undefined &&
+      quotaBytes > 0 && { quotaBytes, quota: formatBytes(quotaBytes) }),
+    ...(percent !== undefined && { percentOfQuota: percent }),
+  };
+}
+
+/** Read a numeric field that CIPP may serialise as a number or a string. */
+function numberField(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+/** Read a string field, treating blanks as absent. */
+function stringField(value: unknown): string | undefined {
+  return nonEmpty(value) ? value : undefined;
+}
+
+/**
+ * Normalise one reporting-database mailbox row.
+ *
+ * `Set-CIPPDBCacheMailboxes` writes every size as an int64 byte count and
+ * defaults each one to `0`, so a zero here means "nothing was merged in" just
+ * as often as it means "empty mailbox". That ambiguity is unresolvable per
+ * row; {@link summariseMailboxUsage} catches the systemic case instead.
+ */
+function normaliseReportRow(row: Record<string, unknown>): MailboxUsageRow {
+  const archiveEnabled = row.ArchiveEnabled === true;
+  const upn = stringField(row.UPN);
+  const displayName = stringField(row.displayName);
+  const recipientTypeDetails = stringField(row.recipientTypeDetails);
+  const tenant = stringField(row.Tenant);
+
+  return {
+    ...(upn !== undefined && { userPrincipalName: upn }),
+    ...(displayName !== undefined && { displayName }),
+    ...(recipientTypeDetails !== undefined && { recipientTypeDetails }),
+    ...(tenant !== undefined && { tenant }),
+    mailbox: sizeReport(
+      toBytes(row.storageUsedInBytes),
+      toBytes(row.prohibitSendReceiveQuotaInBytes),
+      numberField(row.MailboxItemCount)
+    ),
+    archive: {
+      enabled: archiveEnabled,
+      // Sizes are only collected for mailboxes that have an archive; reporting
+      // a measured 0 for the rest would read as "archive present but empty".
+      ...(archiveEnabled
+        ? sizeReport(
+            toBytes(row.ArchiveSize),
+            toBytes(row.ArchiveQuota),
+            numberField(row.ArchiveItemCount)
+          )
+        : {}),
+      ...(typeof row.AutoExpandingArchive === 'boolean' && {
+        autoExpanding: row.AutoExpandingArchive,
+      }),
+    },
+  };
+}
+
+/** Total bytes a mailbox occupies across its primary store and its archive. */
+function totalMailboxBytes(row: MailboxUsageRow): number {
+  return (row.mailbox.bytes ?? 0) + (row.archive.bytes ?? 0);
+}
+
+/** The figure a given sort orders on; `undefined` sorts last. */
+function sortValue(row: MailboxUsageRow, sortBy: MailboxUsageSort): number | undefined {
+  switch (sortBy) {
+    case 'mailboxSize':
+      return row.mailbox.bytes;
+    case 'archiveSize':
+      return row.archive.bytes;
+    case 'totalSize':
+      return totalMailboxBytes(row);
+    case 'percentOfQuota':
+      return row.mailbox.percentOfQuota;
+  }
+}
+
+/**
+ * Tenant-wide totals plus the warnings a caller needs to read them honestly.
+ *
+ * The concealment check is the important one. With "conceal user, group, and
+ * site names" enabled in the M365 admin centre, Graph's usage reports return
+ * 32-character hex hashes in place of UPNs. `Set-CIPPDBCacheMailboxes` joins
+ * the report to the mailbox list *on the UPN*, so the join matches nothing and
+ * every mailbox keeps its `0` default — a tenant that reads as empty rather
+ * than one that failed. Returning that silently would be worse than returning
+ * nothing at all.
+ */
+function summariseMailboxUsage(rows: MailboxUsageRow[]): {
+  summary: Record<string, unknown>;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+
+  if (rows.length > 0 && rows.every((r) => (r.mailbox.bytes ?? 0) === 0)) {
+    warnings.push(
+      'Every mailbox reports 0 bytes used. That is the signature of a failed usage merge, ' +
+        'not an empty tenant: it happens when "conceal user, group, and site names" is enabled ' +
+        'for reports in the Microsoft 365 admin centre, or when the CIPP report cache was ' +
+        'synced before usage data was available. Re-sync the cache with concealment off, or ' +
+        'use cipp_get_mailbox_usage, which reads one mailbox live and is unaffected.'
+    );
+  }
+  if (rows.some((r) => r.userPrincipalName && CONCEALED_NAME_RE.test(r.userPrincipalName))) {
+    warnings.push(
+      'Some mailboxes are identified by a 32-character hash instead of a UPN, so this tenant ' +
+        'conceals names in its Microsoft 365 usage reports. Sizes on those rows cannot be ' +
+        'attributed back to a person.'
+    );
+  }
+
+  const mailboxBytes = rows.reduce((sum, r) => sum + (r.mailbox.bytes ?? 0), 0);
+  const archiveBytes = rows.reduce((sum, r) => sum + (r.archive.bytes ?? 0), 0);
+
+  return {
+    summary: {
+      mailboxCount: rows.length,
+      archivesEnabled: rows.filter((r) => r.archive.enabled).length,
+      mailboxBytes,
+      mailboxSize: formatBytes(mailboxBytes),
+      archiveBytes,
+      archiveSize: formatBytes(archiveBytes),
+      totalBytes: mailboxBytes + archiveBytes,
+      totalSize: formatBytes(mailboxBytes + archiveBytes),
+      [`atOrOver${NEAR_QUOTA_PERCENT}PercentOfQuota`]: rows.filter(
+        (r) => (r.mailbox.percentOfQuota ?? 0) >= NEAR_QUOTA_PERCENT
+      ).length,
+    },
+    warnings,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +694,8 @@ export class CippService {
    */
   private async resolveUserIdentity(
     tenantFilter: string,
-    upnOrId: string
+    upnOrId: string,
+    reason = 'Refusing to edit: CIPP rebuilds and re-writes userPrincipalName on every EditUser call, so editing without the account\'s current UPN would rename it.'
   ): Promise<{ id: string; userPrincipalName: string; username: string; domain: string }> {
     const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const byId = GUID_RE.test(upnOrId);
@@ -512,7 +722,7 @@ export class CippService {
     if (!upn || !id || !upn.includes('@')) {
       throw new McpError(
         ErrorCode.InvalidParams,
-        `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. Refusing to edit: CIPP rebuilds and re-writes userPrincipalName on every EditUser call, so editing without the account's current UPN would rename it.`
+        `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. ${reason}`
       );
     }
 
@@ -836,6 +1046,216 @@ export class CippService {
       tenantFilter,
       UserPrincipalName: upn,
     });
+  }
+
+  /**
+   * Report primary-mailbox and online-archive sizes for one mailbox.
+   * Calls the `ListUserMailboxDetails` Azure Function.
+   *
+   * Reads live rather than from CIPP's reporting database, which makes it the
+   * reliable option in two situations the tenant-wide tool cannot cover: a
+   * tenant whose report cache has never been synced, and a tenant that
+   * conceals names in its Microsoft 365 usage reports. `Invoke-ListUser-
+   * MailboxDetails` takes the primary size straight from the Exchange admin
+   * API (`Mailbox('<id>')/Exchange.GetMailboxStatistics()`), never from the
+   * Graph usage reports, so concealment cannot blank it.
+   *
+   * Upstream returns every size as a gigabyte figure rounded to two decimals,
+   * so the byte counts here are accurate to roughly 10 MB. Quotas are the
+   * exception: they are recovered exactly from the raw `Get-Mailbox` object
+   * that CIPP includes in the response, whose Exchange-formatted string
+   * carries the true byte count.
+   *
+   * @param tenantFilter - Tenant domain or GUID. `allTenants` is not supported.
+   * @param upnOrId      - UPN or Entra object id of the mailbox owner.
+   */
+  async getMailboxUsage(
+    tenantFilter: string,
+    upnOrId: string
+  ): Promise<Record<string, unknown>> {
+    // The endpoint keys off the Entra object id — a UPN in `UserID` returns an
+    // empty shell rather than an error, so resolve before asking.
+    const identity = await this.resolveUserIdentity(
+      tenantFilter,
+      upnOrId,
+      'Mailbox usage is looked up by Entra object id, which could not be determined.'
+    );
+
+    const details = await this.request<Record<string, unknown>>(
+      'GET',
+      'ListUserMailboxDetails',
+      {
+        tenantFilter,
+        UserID: identity.id,
+        userMail: identity.userPrincipalName,
+      }
+    );
+
+    const raw = (details ?? {}) as Record<string, unknown>;
+    const mailboxObject = (raw.Mailbox ?? {}) as Record<string, unknown>;
+    const archiveEnabled = raw.ArchiveMailBox === true;
+
+    // The top-level quota has had its unit stripped upstream
+    // (`[float]($ProhibitSendReceiveQuota -split ' ')[0]`), so a mailbox with a
+    // quota Exchange prints in TB would read as a handful of GB. The raw
+    // Get-Mailbox string still carries "(N bytes)", so prefer it and keep the
+    // stripped figure only as a fallback.
+    const quotaBytes =
+      toBytes(mailboxObject.ProhibitSendReceiveQuota) ??
+      fromGigabytes(raw.ProhibitSendReceiveQuota);
+
+    const displayName = stringField(mailboxObject.DisplayName);
+    const recipientTypeDetails = stringField(raw.RecipientTypeDetails);
+
+    return {
+      tenantFilter,
+      source: 'live',
+      userPrincipalName: identity.userPrincipalName,
+      ...(displayName !== undefined && { displayName }),
+      ...(recipientTypeDetails !== undefined && { recipientTypeDetails }),
+      mailbox: sizeReport(
+        fromGigabytes(raw.TotalItemSize),
+        quotaBytes,
+        numberField(raw.ItemCount)
+      ),
+      archive: {
+        enabled: archiveEnabled,
+        ...(archiveEnabled
+          ? sizeReport(
+              fromGigabytes(raw.TotalArchiveItemSize),
+              toBytes(mailboxObject.ArchiveQuota),
+              numberField(raw.TotalArchiveItemCount)
+            )
+          : {}),
+        ...(typeof raw.AutoExpandingArchive === 'boolean' && {
+          autoExpanding: raw.AutoExpandingArchive,
+        }),
+        ...(stringField(raw.AutoExpandingArchiveScope) !== undefined && {
+          autoExpandingScope: stringField(raw.AutoExpandingArchiveScope),
+        }),
+      },
+    };
+  }
+
+  /**
+   * Report primary-mailbox and online-archive sizes across a whole tenant.
+   * Calls `ListMailboxes` with `UseReportDB=true`.
+   *
+   * Sizes exist *only* on that cached path: `Invoke-ListMailboxes`' live
+   * Exchange query selects no size fields at all, so this is the one
+   * tenant-wide source. The cache in turn merges Graph's
+   * `getMailboxUsageDetail` report (primary size, item count, quota) with
+   * bulk `Get-MailboxStatistics -Archive` calls (archive size and count).
+   *
+   * The full row set is fetched and totalled before `limit` is applied, so the
+   * summary describes the whole tenant even when only the top mailboxes are
+   * returned. Returning every row of a large tenant would exceed the client's
+   * tool-result limit — the same failure `cipp_list_users` hit.
+   *
+   * @param tenantFilter    - Tenant domain or GUID, or `AllTenants`.
+   * @param params.sortBy   - Ordering, largest first. Defaults to `mailboxSize`.
+   * @param params.limit    - Rows to return. Defaults to 50, maximum 1000.
+   * @param params.minSizeGB - Drop mailboxes whose primary and archive stores
+   *                           together fall below this size.
+   */
+  async listMailboxUsage(
+    tenantFilter: string,
+    params: { sortBy?: string; limit?: number; minSizeGB?: number } = {}
+  ): Promise<Record<string, unknown>> {
+    const sortBy = (params.sortBy ?? 'mailboxSize') as MailboxUsageSort;
+    if (!MAILBOX_USAGE_SORTS.includes(sortBy)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `sortBy must be one of ${MAILBOX_USAGE_SORTS.join(', ')}; got "${params.sortBy}".`
+      );
+    }
+
+    const limit = params.limit ?? MAILBOX_USAGE_DEFAULT_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAILBOX_USAGE_MAX_LIMIT) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `limit must be an integer between 1 and ${MAILBOX_USAGE_MAX_LIMIT}; got ${params.limit}.`
+      );
+    }
+
+    const minSizeGB = params.minSizeGB;
+    if (minSizeGB !== undefined && (!Number.isFinite(minSizeGB) || minSizeGB < 0)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `minSizeGB must be a non-negative number; got ${minSizeGB}.`
+      );
+    }
+
+    let raw: unknown;
+    try {
+      raw = await this.request<unknown>('GET', 'ListMailboxes', {
+        tenantFilter,
+        UseReportDB: true,
+      });
+    } catch (err) {
+      // CIPP serves the unsynced-cache case as an HTTP 500 whose body is the
+      // bare message, which would otherwise surface as an opaque server error.
+      if (err instanceof McpError && REPORT_DB_UNSYNCED_RE.test(err.message)) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `CIPP has no cached mailbox data for tenant ${tenantFilter}, so tenant-wide sizes ` +
+            'are unavailable. Mailbox and archive sizes are only stored in CIPP\'s reporting ' +
+            'database — the live Exchange query returns no size fields at all. Sync it from ' +
+            'CIPP under Reports → Report Settings (or run the Mailboxes cache job), then retry. ' +
+            'For a single mailbox, cipp_get_mailbox_usage reads live and needs no cache.'
+        );
+      }
+      throw err;
+    }
+
+    // Non-paginated report reads return a bare array; the paginated form wraps
+    // it as { Results, Metadata }. Accept either rather than assuming.
+    const container = raw as { Results?: unknown };
+    const list = Array.isArray(raw)
+      ? raw
+      : Array.isArray(container?.Results)
+        ? container.Results
+        : [];
+
+    const rows = (list as unknown[])
+      .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+      .map(normaliseReportRow);
+
+    const { summary, warnings } = summariseMailboxUsage(rows);
+
+    const cachedAt = (list as Array<Record<string, unknown>>)
+      .map((r) => stringField(r.CacheTimestamp))
+      .filter((t): t is string => t !== undefined)
+      .sort()
+      .pop();
+
+    const threshold = minSizeGB === undefined ? undefined : minSizeGB * GIB;
+    const matching =
+      threshold === undefined ? rows : rows.filter((r) => totalMailboxBytes(r) >= threshold);
+
+    const sorted = [...matching].sort((a, b) => {
+      const left = sortValue(a, sortBy);
+      const right = sortValue(b, sortBy);
+      if (left === right) return 0;
+      // Unknown figures sort last in either direction rather than reading as 0,
+      // which would rank an unmeasured mailbox as the emptiest one.
+      if (left === undefined) return 1;
+      if (right === undefined) return -1;
+      return right - left;
+    });
+
+    return {
+      tenantFilter,
+      source: 'reportDatabase',
+      ...(cachedAt !== undefined && { cachedAt }),
+      summary,
+      ...(warnings.length > 0 && { warnings }),
+      sortedBy: sortBy,
+      ...(minSizeGB !== undefined && { minSizeGB }),
+      totalMatching: matching.length,
+      returned: Math.min(limit, matching.length),
+      mailboxes: sorted.slice(0, limit),
+    };
   }
 
   /**

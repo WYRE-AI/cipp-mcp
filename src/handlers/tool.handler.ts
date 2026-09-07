@@ -254,6 +254,27 @@ export class CippToolHandler {
           break;
         }
 
+        case 'cipp_list_mailbox_usage': {
+          const { tenantFilter, sortBy, limit, minSizeGB } = args as {
+            tenantFilter: string;
+            sortBy?: string;
+            limit?: number;
+            minSizeGB?: number;
+          };
+          result = await this.cippService.listMailboxUsage(tenantFilter, {
+            ...(sortBy !== undefined && { sortBy }),
+            ...(limit !== undefined && { limit }),
+            ...(minSizeGB !== undefined && { minSizeGB }),
+          });
+          break;
+        }
+
+        case 'cipp_get_mailbox_usage': {
+          const { tenantFilter, upn } = args as { tenantFilter: string; upn: string };
+          result = await this.cippService.getMailboxUsage(tenantFilter, upn);
+          break;
+        }
+
         case 'cipp_set_out_of_office': {
           // The optional fields are named as the service expects, so they pass
           // through as-is. The cast reflects the declared schema; the service
