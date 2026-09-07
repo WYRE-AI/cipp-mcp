@@ -197,7 +197,9 @@ describe('CippService listMailboxUsage', () => {
     expect(result.summary.archivesEnabled).toBe(1);
     expect(result.summary.archiveBytes).toBe(5 * GIB);
     expect(result.summary.totalBytes).toBe(58 * GIB);
-    expect(result.summary.atOrOver90PercentOfQuota).toBe(1);
+    expect(result.summary.nearQuotaCount).toBe(1);
+    // The threshold travels with the count, so a caller never has to guess it.
+    expect(result.summary.nearQuotaPercent).toBe(90);
   });
 
   it('filters on the primary store and archive combined', async () => {
@@ -412,7 +414,7 @@ describe('CippService getMailboxUsage', () => {
     const result = (await svc.getMailboxUsage('contoso.com', 'alice@contoso.com')) as any;
 
     expect(result.mailbox.quotaBytes).toBe(50 * GIB);
-    expect(result.archive).not.toHaveProperty('quotaBytes');
+    expect(result.archive.quotaBytes).toBeUndefined();
   });
 
   it('reports an absent archive as disabled with no measured size', async () => {

@@ -6,7 +6,14 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { Logger } from '../utils/logger.js';
 import { TokenProvider } from './token.service.js';
-import { toBytes, formatBytes, percentOfQuota, fromGigabytes, GIB } from '../utils/bytes.js';
+import {
+  toBytes,
+  formatBytes,
+  percentOfQuota,
+  fromGigabytes,
+  toFiniteNumber,
+  GIB,
+} from '../utils/bytes.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -209,6 +216,7 @@ export interface MailboxSizeReport {
 export interface ArchiveSizeReport extends MailboxSizeReport {
   enabled: boolean;
   autoExpanding?: boolean;
+  autoExpandingScope?: string;
 }
 
 /** Per-mailbox usage as returned by the usage tools. */
@@ -224,7 +232,49 @@ export interface MailboxUsageRow {
 
 /** Orderings `listMailboxUsage` can sort by, largest first. */
 const MAILBOX_USAGE_SORTS = ['mailboxSize', 'archiveSize', 'totalSize', 'percentOfQuota'] as const;
-type MailboxUsageSort = (typeof MAILBOX_USAGE_SORTS)[number];
+export type MailboxUsageSort = (typeof MAILBOX_USAGE_SORTS)[number];
+
+/** Tenant-wide totals accompanying a {@link MailboxUsageListing}. */
+export interface MailboxUsageSummary {
+  mailboxCount: number;
+  archivesEnabled: number;
+  mailboxBytes: number;
+  mailboxSize?: string;
+  archiveBytes: number;
+  archiveSize?: string;
+  totalBytes: number;
+  totalSize?: string;
+  /** Mailboxes at or above `nearQuotaPercent` of their primary quota. */
+  nearQuotaCount: number;
+  /** The threshold `nearQuotaCount` was counted against. */
+  nearQuotaPercent: number;
+}
+
+/** What {@link CippService.getMailboxUsage} returns. */
+export interface MailboxUsageReport {
+  tenantFilter: string;
+  source: 'live';
+  userPrincipalName: string;
+  displayName?: string;
+  recipientTypeDetails?: string;
+  mailbox: MailboxSizeReport;
+  archive: ArchiveSizeReport;
+}
+
+/** What {@link CippService.listMailboxUsage} returns. */
+export interface MailboxUsageListing {
+  tenantFilter: string;
+  source: 'reportDatabase';
+  /** Timestamp of the newest cached row, so a caller can judge staleness. */
+  cachedAt?: string;
+  summary: MailboxUsageSummary;
+  warnings?: string[];
+  sortedBy: MailboxUsageSort;
+  minSizeGB?: number;
+  totalMatching: number;
+  returned: number;
+  mailboxes: MailboxUsageRow[];
+}
 
 /** Default page size for `listMailboxUsage`. A whole-tenant dump blows the tool-result limit. */
 const MAILBOX_USAGE_DEFAULT_LIMIT = 50;
@@ -254,29 +304,48 @@ function sizeReport(
   quotaBytes: number | undefined,
   itemCount: number | undefined
 ): MailboxSizeReport {
-  const percent = percentOfQuota(bytes, quotaBytes);
+  // A quota of 0 is the reporting database's "no quota data" default, not a
+  // real limit of nothing — treating it as one would put every mailbox
+  // infinitely over its quota.
+  const quota = quotaBytes !== undefined && quotaBytes > 0 ? quotaBytes : undefined;
   return {
-    ...(bytes !== undefined && { bytes, size: formatBytes(bytes) }),
-    ...(itemCount !== undefined && { itemCount }),
-    ...(quotaBytes !== undefined &&
-      quotaBytes > 0 && { quotaBytes, quota: formatBytes(quotaBytes) }),
-    ...(percent !== undefined && { percentOfQuota: percent }),
+    bytes,
+    size: formatBytes(bytes),
+    itemCount,
+    quotaBytes: quota,
+    quota: formatBytes(quota),
+    percentOfQuota: percentOfQuota(bytes, quota),
   };
-}
-
-/** Read a numeric field that CIPP may serialise as a number or a string. */
-function numberField(value: unknown): number | undefined {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
 }
 
 /** Read a string field, treating blanks as absent. */
 function stringField(value: unknown): string | undefined {
   return nonEmpty(value) ? value : undefined;
+}
+
+/**
+ * Assemble a mailbox's archive block.
+ *
+ * Sizes are emitted only when the archive actually exists. Both sources
+ * default an absent archive's figures to `0`, and passing that through would
+ * read as "archive present but empty" — a different fact from "no archive".
+ */
+function archiveReport(
+  enabled: boolean,
+  bytes: number | undefined,
+  quotaBytes: number | undefined,
+  itemCount: number | undefined,
+  autoExpanding: unknown,
+  autoExpandingScope?: unknown
+): ArchiveSizeReport {
+  return {
+    enabled,
+    // Load-bearing: both sources default an absent archive's figures to 0, so
+    // calling sizeReport unconditionally would emit a measured "0 B".
+    ...(enabled ? sizeReport(bytes, quotaBytes, itemCount) : {}),
+    ...(typeof autoExpanding === 'boolean' && { autoExpanding }),
+    autoExpandingScope: stringField(autoExpandingScope),
+  };
 }
 
 /**
@@ -295,30 +364,22 @@ function normaliseReportRow(row: Record<string, unknown>): MailboxUsageRow {
   const tenant = stringField(row.Tenant);
 
   return {
-    ...(upn !== undefined && { userPrincipalName: upn }),
-    ...(displayName !== undefined && { displayName }),
-    ...(recipientTypeDetails !== undefined && { recipientTypeDetails }),
-    ...(tenant !== undefined && { tenant }),
+    userPrincipalName: upn,
+    displayName,
+    recipientTypeDetails,
+    tenant,
     mailbox: sizeReport(
       toBytes(row.storageUsedInBytes),
       toBytes(row.prohibitSendReceiveQuotaInBytes),
-      numberField(row.MailboxItemCount)
+      toFiniteNumber(row.MailboxItemCount)
     ),
-    archive: {
-      enabled: archiveEnabled,
-      // Sizes are only collected for mailboxes that have an archive; reporting
-      // a measured 0 for the rest would read as "archive present but empty".
-      ...(archiveEnabled
-        ? sizeReport(
-            toBytes(row.ArchiveSize),
-            toBytes(row.ArchiveQuota),
-            numberField(row.ArchiveItemCount)
-          )
-        : {}),
-      ...(typeof row.AutoExpandingArchive === 'boolean' && {
-        autoExpanding: row.AutoExpandingArchive,
-      }),
-    },
+    archive: archiveReport(
+      archiveEnabled,
+      toBytes(row.ArchiveSize),
+      toBytes(row.ArchiveQuota),
+      toFiniteNumber(row.ArchiveItemCount),
+      row.AutoExpandingArchive
+    ),
   };
 }
 
@@ -353,7 +414,7 @@ function sortValue(row: MailboxUsageRow, sortBy: MailboxUsageSort): number | und
  * nothing at all.
  */
 function summariseMailboxUsage(rows: MailboxUsageRow[]): {
-  summary: Record<string, unknown>;
+  summary: MailboxUsageSummary;
   warnings: string[];
 } {
   const warnings: string[] = [];
@@ -388,9 +449,10 @@ function summariseMailboxUsage(rows: MailboxUsageRow[]): {
       archiveSize: formatBytes(archiveBytes),
       totalBytes: mailboxBytes + archiveBytes,
       totalSize: formatBytes(mailboxBytes + archiveBytes),
-      [`atOrOver${NEAR_QUOTA_PERCENT}PercentOfQuota`]: rows.filter(
+      nearQuotaCount: rows.filter(
         (r) => (r.mailbox.percentOfQuota ?? 0) >= NEAR_QUOTA_PERCENT
       ).length,
+      nearQuotaPercent: NEAR_QUOTA_PERCENT,
     },
     warnings,
   };
@@ -695,7 +757,7 @@ export class CippService {
   private async resolveUserIdentity(
     tenantFilter: string,
     upnOrId: string,
-    reason = 'Refusing to edit: CIPP rebuilds and re-writes userPrincipalName on every EditUser call, so editing without the account\'s current UPN would rename it.'
+    reason: string
   ): Promise<{ id: string; userPrincipalName: string; username: string; domain: string }> {
     const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const byId = GUID_RE.test(upnOrId);
@@ -748,7 +810,11 @@ export class CippService {
     userData: Record<string, unknown>,
     licenseOptions?: { licenses?: string[]; removeLicenses?: boolean }
   ): Promise<T> {
-    const identity = await this.resolveUserIdentity(tenantFilter, userId);
+    const identity = await this.resolveUserIdentity(
+      tenantFilter,
+      userId,
+      'Refusing to edit: CIPP rebuilds and re-writes userPrincipalName on every EditUser call, so editing without the account\'s current UPN would rename it.'
+    );
 
     const body: Record<string, unknown> = {
       tenantFilter,
@@ -876,7 +942,11 @@ export class CippService {
   ): Promise<T> {
     // The offboarding tasks anchor Exchange and MFA operations on the UPN, so
     // resolve an object id to the account's current UPN before queueing.
-    const identity = await this.resolveUserIdentity(tenantFilter, userId);
+    const identity = await this.resolveUserIdentity(
+      tenantFilter,
+      userId,
+      'Refusing to queue offboarding: the offboarding job anchors its Exchange and MFA operations on the account\'s current UPN.'
+    );
     const opts = options ?? {};
 
     const body: Record<string, unknown> = {
@@ -1072,7 +1142,7 @@ export class CippService {
   async getMailboxUsage(
     tenantFilter: string,
     upnOrId: string
-  ): Promise<Record<string, unknown>> {
+  ): Promise<MailboxUsageReport> {
     // The endpoint keys off the Entra object id — a UPN in `UserID` returns an
     // empty shell rather than an error, so resolve before asking.
     const identity = await this.resolveUserIdentity(
@@ -1104,36 +1174,25 @@ export class CippService {
       toBytes(mailboxObject.ProhibitSendReceiveQuota) ??
       fromGigabytes(raw.ProhibitSendReceiveQuota);
 
-    const displayName = stringField(mailboxObject.DisplayName);
-    const recipientTypeDetails = stringField(raw.RecipientTypeDetails);
-
     return {
       tenantFilter,
       source: 'live',
       userPrincipalName: identity.userPrincipalName,
-      ...(displayName !== undefined && { displayName }),
-      ...(recipientTypeDetails !== undefined && { recipientTypeDetails }),
+      displayName: stringField(mailboxObject.DisplayName),
+      recipientTypeDetails: stringField(raw.RecipientTypeDetails),
       mailbox: sizeReport(
         fromGigabytes(raw.TotalItemSize),
         quotaBytes,
-        numberField(raw.ItemCount)
+        toFiniteNumber(raw.ItemCount)
       ),
-      archive: {
-        enabled: archiveEnabled,
-        ...(archiveEnabled
-          ? sizeReport(
-              fromGigabytes(raw.TotalArchiveItemSize),
-              toBytes(mailboxObject.ArchiveQuota),
-              numberField(raw.TotalArchiveItemCount)
-            )
-          : {}),
-        ...(typeof raw.AutoExpandingArchive === 'boolean' && {
-          autoExpanding: raw.AutoExpandingArchive,
-        }),
-        ...(stringField(raw.AutoExpandingArchiveScope) !== undefined && {
-          autoExpandingScope: stringField(raw.AutoExpandingArchiveScope),
-        }),
-      },
+      archive: archiveReport(
+        archiveEnabled,
+        fromGigabytes(raw.TotalArchiveItemSize),
+        toBytes(mailboxObject.ArchiveQuota),
+        toFiniteNumber(raw.TotalArchiveItemCount),
+        raw.AutoExpandingArchive,
+        raw.AutoExpandingArchiveScope
+      ),
     };
   }
 
@@ -1161,7 +1220,7 @@ export class CippService {
   async listMailboxUsage(
     tenantFilter: string,
     params: { sortBy?: string; limit?: number; minSizeGB?: number } = {}
-  ): Promise<Record<string, unknown>> {
+  ): Promise<MailboxUsageListing> {
     const sortBy = (params.sortBy ?? 'mailboxSize') as MailboxUsageSort;
     if (!MAILBOX_USAGE_SORTS.includes(sortBy)) {
       throw new McpError(
@@ -1210,30 +1269,28 @@ export class CippService {
 
     // Non-paginated report reads return a bare array; the paginated form wraps
     // it as { Results, Metadata }. Accept either rather than assuming.
-    const container = raw as { Results?: unknown };
-    const list = Array.isArray(raw)
-      ? raw
-      : Array.isArray(container?.Results)
-        ? container.Results
-        : [];
+    const results = Array.isArray(raw) ? raw : (raw as { Results?: unknown })?.Results;
+    const records = (Array.isArray(results) ? results : []).filter(
+      (r): r is Record<string, unknown> => typeof r === 'object' && r !== null
+    );
 
-    const rows = (list as unknown[])
-      .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
-      .map(normaliseReportRow);
+    // Newest cache timestamp, taken in one pass — a page can span tenants, so
+    // the rows do not arrive in timestamp order.
+    let cachedAt: string | undefined;
+    for (const record of records) {
+      const stamp = stringField(record.CacheTimestamp);
+      if (stamp !== undefined && (cachedAt === undefined || stamp > cachedAt)) cachedAt = stamp;
+    }
 
+    const rows = records.map(normaliseReportRow);
     const { summary, warnings } = summariseMailboxUsage(rows);
 
-    const cachedAt = (list as Array<Record<string, unknown>>)
-      .map((r) => stringField(r.CacheTimestamp))
-      .filter((t): t is string => t !== undefined)
-      .sort()
-      .pop();
-
     const threshold = minSizeGB === undefined ? undefined : minSizeGB * GIB;
+    // Already a fresh array in both branches, so this sorts in place safely.
     const matching =
       threshold === undefined ? rows : rows.filter((r) => totalMailboxBytes(r) >= threshold);
 
-    const sorted = [...matching].sort((a, b) => {
+    matching.sort((a, b) => {
       const left = sortValue(a, sortBy);
       const right = sortValue(b, sortBy);
       if (left === right) return 0;
@@ -1244,17 +1301,21 @@ export class CippService {
       return right - left;
     });
 
+    const mailboxes = matching.slice(0, limit);
+
     return {
       tenantFilter,
       source: 'reportDatabase',
-      ...(cachedAt !== undefined && { cachedAt }),
+      cachedAt,
       summary,
+      // An empty array survives JSON.stringify where an undefined key does not,
+      // so this one stays conditional.
       ...(warnings.length > 0 && { warnings }),
       sortedBy: sortBy,
-      ...(minSizeGB !== undefined && { minSizeGB }),
+      minSizeGB,
       totalMatching: matching.length,
-      returned: Math.min(limit, matching.length),
-      mailboxes: sorted.slice(0, limit),
+      returned: mailboxes.length,
+      mailboxes,
     };
   }
 

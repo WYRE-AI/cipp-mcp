@@ -7,17 +7,25 @@
 // near quota" should not have to know which one it got, so both are parsed to
 // a plain byte count here and re-rendered once, consistently.
 
+/**
+ * Read a value CIPP may serialise as a number or as a numeric string.
+ *
+ * Deliberately not `Number(value)`: that coerces `null`, `''` and `false` to
+ * `0`, which would turn "CIPP reported nothing here" into a confident zero —
+ * the difference between an unmeasured mailbox and an empty one.
+ */
+export function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /** One binary gigabyte. CIPP's per-user endpoint reports sizes pre-divided by this. */
 export const GIB = 1024 ** 3;
 
-/** Binary unit multipliers, keyed by the suffix Exchange prints. */
-const UNIT_BYTES: Record<string, number> = {
-  B: 1,
-  KB: 1024,
-  MB: 1024 ** 2,
-  GB: 1024 ** 3,
-  TB: 1024 ** 4,
-};
+/** The unit ladder, smallest first. Index doubles as the power of 1024. */
+const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
 /**
  * Exchange's display form carries the exact count in parentheses:
@@ -39,28 +47,23 @@ const SCALED_SIZE_RE = /^\s*([\d.,]+)\s*(B|KB|MB|GB|TB)\b/i;
  *          zero would make every mailbox look infinitely over its limit.
  */
 export function toBytes(value: unknown): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
+  if (typeof value === 'number') return toFiniteNumber(value);
   if (typeof value !== 'string') return undefined;
 
   const exact = EXACT_BYTES_RE.exec(value);
-  if (exact) {
-    const parsed = Number(exact[1].replace(/,/g, ''));
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
+  if (exact) return toFiniteNumber(exact[1].replace(/,/g, ''));
 
   const scaled = SCALED_SIZE_RE.exec(value);
   if (scaled) {
-    const parsed = Number(scaled[1].replace(/,/g, ''));
-    if (!Number.isFinite(parsed)) return undefined;
-    return Math.round(parsed * UNIT_BYTES[scaled[2].toUpperCase()]);
+    const parsed = toFiniteNumber(scaled[1].replace(/,/g, ''));
+    if (parsed === undefined) return undefined;
+    const power = UNITS.indexOf(scaled[2].toUpperCase() as (typeof UNITS)[number]);
+    return Math.round(parsed * 1024 ** power);
   }
 
   // A bare numeric string is a byte count; anything else ("Unlimited") is not
   // a size we can act on.
-  const bare = Number(value.trim().replace(/,/g, ''));
-  return value.trim() !== '' && Number.isFinite(bare) ? bare : undefined;
+  return toFiniteNumber(value.replace(/,/g, ''));
 }
 
 /**
@@ -74,16 +77,15 @@ export function formatBytes(bytes: number | undefined): string | undefined {
   if (bytes < 0) return undefined;
   if (bytes === 0) return '0 B';
 
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let index = 0;
   let scaled = bytes;
-  while (scaled >= 1024 && index < units.length - 1) {
+  while (scaled >= 1024 && index < UNITS.length - 1) {
     scaled /= 1024;
     index += 1;
   }
   // Whole bytes read oddly with decimals; every larger unit needs them.
   const decimals = index === 0 ? 0 : 2;
-  return `${scaled.toFixed(decimals)} ${units[index]}`;
+  return `${scaled.toFixed(decimals)} ${UNITS[index]}`;
 }
 
 /**
@@ -111,10 +113,7 @@ export function percentOfQuota(
  * @returns Byte count, or `undefined` when `gb` is not a usable number.
  */
 export function fromGigabytes(gb: unknown): number | undefined {
-  // Deliberately not `Number(gb)`: that coerces null, '' and false to 0, which
-  // would report a size CIPP never measured as a confident zero.
-  const value =
-    typeof gb === 'number' ? gb : typeof gb === 'string' && gb.trim() !== '' ? Number(gb) : NaN;
-  if (!Number.isFinite(value) || value < 0) return undefined;
+  const value = toFiniteNumber(gb);
+  if (value === undefined || value < 0) return undefined;
   return Math.round(value * GIB);
 }

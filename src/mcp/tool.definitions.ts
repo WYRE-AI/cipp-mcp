@@ -619,7 +619,10 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           maximum: 1000,
           description:
             'Number of mailboxes to return (default 50, maximum 1000). The summary totals ' +
-            'always cover every mailbox in the tenant, not just the ones returned.',
+            'always cover every mailbox in the tenant, not just the ones returned — including ' +
+            '`nearQuotaCount`, how many mailboxes sit at or above `nearQuotaPercent` of their ' +
+            'quota, which answers the "who is about to stop receiving mail" question without ' +
+            'reading a single row.',
         },
         minSizeGB: {
           type: 'number',

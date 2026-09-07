@@ -262,9 +262,9 @@ export class CippToolHandler {
             minSizeGB?: number;
           };
           result = await this.cippService.listMailboxUsage(tenantFilter, {
-            ...(sortBy !== undefined && { sortBy }),
-            ...(limit !== undefined && { limit }),
-            ...(minSizeGB !== undefined && { minSizeGB }),
+            sortBy,
+            limit,
+            minSizeGB,
           });
           break;
         }
