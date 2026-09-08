@@ -591,6 +591,76 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     },
   },
   {
+    name: 'cipp_list_mailbox_usage',
+    description:
+      'Report mailbox and online-archive sizes across a tenant, largest first, with ' +
+      'tenant-wide totals. Each mailbox reports bytes used, a human-readable size, item ' +
+      'count, quota and percent-of-quota, for both the primary store and the archive. ' +
+      "Answers 'who is near quota', 'which mailboxes need archiving', and 'how much " +
+      "Exchange storage does this tenant use'. Sizes come from CIPP's reporting database, " +
+      'which must have been synced — the live Exchange query carries no size data at all. ' +
+      'For one mailbox, or when the cache is unavailable, use cipp_get_mailbox_usage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: TENANT_FILTER_PROP,
+        sortBy: {
+          type: 'string',
+          enum: ['mailboxSize', 'archiveSize', 'totalSize', 'percentOfQuota'],
+          description:
+            'Ordering, largest first. `mailboxSize` (default) ranks by the primary store, ' +
+            '`archiveSize` by the online archive, `totalSize` by the two combined, and ' +
+            '`percentOfQuota` by how full the primary store is relative to its quota — ' +
+            'the one to use when hunting for mailboxes about to stop receiving mail.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description:
+            'Number of mailboxes to return (default 50, maximum 1000). The summary totals ' +
+            'always cover every mailbox in the tenant, not just the ones returned — including ' +
+            '`nearQuotaCount`, how many mailboxes sit at or above `nearQuotaPercent` of their ' +
+            'quota, which answers the "who is about to stop receiving mail" question without ' +
+            'reading a single row.',
+        },
+        minSizeGB: {
+          type: 'number',
+          minimum: 0,
+          description:
+            'Only return mailboxes whose primary store and archive together reach this ' +
+            'size in GB. Omit to return every mailbox.',
+        },
+      },
+      required: ['tenantFilter'],
+    },
+  },
+  {
+    name: 'cipp_get_mailbox_usage',
+    description:
+      'Report the primary mailbox size and online-archive size for a single mailbox, with ' +
+      'item counts, quotas and percent-of-quota. Reads live from Exchange, so unlike ' +
+      "cipp_list_mailbox_usage it needs no CIPP report-cache sync and still returns real " +
+      'sizes for a tenant that conceals names in its Microsoft 365 usage reports.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            "Tenant domain name or ID that owns the mailbox. 'allTenants' is not supported " +
+            'here — this tool reads one mailbox at a time.',
+        },
+        upn: {
+          type: 'string',
+          description:
+            "User Principal Name or Entra object ID of the mailbox owner (e.g. alice@contoso.com).",
+        },
+      },
+      required: ['tenantFilter', 'upn'],
+    },
+  },
+  {
     name: 'cipp_set_out_of_office',
     description:
       '⚠ HIGH-IMPACT. Configures the out-of-office / auto-reply for a mailbox, ' +
@@ -1103,6 +1173,8 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
   mailboxes: [
     'cipp_list_mailboxes',
     'cipp_list_mailbox_permissions',
+    'cipp_list_mailbox_usage',
+    'cipp_get_mailbox_usage',
     'cipp_set_out_of_office',
     'cipp_set_email_forwarding',
   ],

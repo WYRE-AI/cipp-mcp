@@ -4,8 +4,9 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/KelvinTegelaar
 
 ## Features
 
-- **37 tools** across 11 categories
+- **45 tools** across 12 categories
 - Tenant, user, group, and mailbox management
+- Mailbox and online-archive size reporting, per tenant or per user
 - Security: Conditional Access policies, named locations
 - Standards & compliance: BPA, domain health, drift detection
 - License reporting (per-tenant and CSP-wide)
@@ -94,14 +95,45 @@ Add to your `claude_desktop_config.json`:
 | Tenants | list_tenants, get_tenant_details |
 | Users | list_users, create_user, edit_user, disable_user, reset_password, reset_mfa, revoke_sessions, offboard_user, bec_check, list_mfa_users, list_user_devices, list_user_groups |
 | Groups | list_groups, create_group |
-| Mailboxes | list_mailboxes, list_mailbox_permissions, set_out_of_office, set_email_forwarding |
+| Mailboxes | list_mailboxes, list_mailbox_permissions, list_mailbox_usage, get_mailbox_usage, set_out_of_office, set_email_forwarding |
 | Security | list_conditional_access_policies, list_named_locations |
-| Standards | list_standards, run_standards_check, list_bpa, list_domain_health |
+| Applications | list_enterprise_apps |
+| Standards | list_standards, run_standards_check, list_standard_templates, get_tenant_drift, get_tenant_alignment, create_standard_template, delete_standard_template, list_bpa, list_domain_health |
 | Licenses | list_licenses, list_csp_licenses |
 | Alerts | list_audit_logs, list_alert_queue |
 | GDAP | list_gdap_roles, list_gdap_invites |
 | Scheduler | list_scheduled_items, add_scheduled_item |
 | Core | ping, get_version, list_logs |
+
+### Mailbox and archive sizes
+
+`list_mailbox_usage` reports every mailbox in a tenant — primary size, item
+count, quota, percent of quota, and the same four figures for the online
+archive — sorted largest first, with tenant-wide totals that cover every
+mailbox even when only the top rows are returned.
+
+**It requires CIPP's reporting database to have been synced for that tenant.**
+This is not a design choice: `Invoke-ListMailboxes`' live Exchange query selects
+no size fields at all, so the cache is the only tenant-wide source of sizes.
+Sync it from CIPP under Reports → Report Settings. If it has not been synced the
+tool says so and names the remedy rather than returning an empty result.
+
+`get_mailbox_usage` reports the same figures for a single mailbox and reads
+live, so it needs no cache. Prefer it when the cache is unavailable or stale.
+
+Two caveats worth knowing:
+
+- **Concealed report names blank the tenant-wide sizes.** With *Reports:
+  conceal user, group, and site names* enabled in the Microsoft 365 admin
+  centre, Graph's usage report returns 32-character hashes instead of UPNs, so
+  CIPP's join against the mailbox list matches nothing and every mailbox caches
+  a size of `0` — a tenant that reads as empty rather than as failed.
+  `list_mailbox_usage` detects this and returns a warning alongside the totals.
+  `get_mailbox_usage` is unaffected: it reads the Exchange admin API directly.
+- **Sizes are gigabyte-rounded on the per-user path.** CIPP rounds to two
+  decimal places of a gigabyte before returning, so `get_mailbox_usage` byte
+  counts are accurate to roughly 10 MB. Quotas are exact — they are recovered
+  from the raw `Get-Mailbox` string, which carries the true byte count.
 
 ### CIPP version compatibility
 
