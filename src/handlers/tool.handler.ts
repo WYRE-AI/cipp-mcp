@@ -3,7 +3,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { CippService, OutOfOfficeInput } from '../services/cipp.service.js';
+import { CippGroupType, CippService, OutOfOfficeInput } from '../services/cipp.service.js';
 import { Logger } from '../utils/logger.js';
 import { TOOL_DEFINITIONS } from '../mcp/tool.definitions.js';
 
@@ -148,12 +148,20 @@ export class CippToolHandler {
         }
 
         case 'cipp_reset_password': {
-          const { tenantFilter, userId, newPassword } = args as {
+          // `newPassword` is deliberately still destructured even though the
+          // schema no longer advertises it: CIPP ignores a supplied password
+          // and generates its own, so the service rejects it loudly rather
+          // than letting a caller believe a password it chose was set.
+          const { tenantFilter, userId, mustChangeAtNextSignIn, newPassword } = args as {
             tenantFilter: string;
             userId: string;
+            mustChangeAtNextSignIn?: boolean;
             newPassword?: string;
           };
-          result = await this.cippService.resetPassword(tenantFilter, userId, newPassword);
+          result = await this.cippService.resetPassword(tenantFilter, userId, {
+            ...(mustChangeAtNextSignIn !== undefined ? { mustChangeAtNextSignIn } : {}),
+            ...(newPassword !== undefined ? { newPassword } : {}),
+          });
           break;
         }
 
@@ -215,27 +223,22 @@ export class CippToolHandler {
         }
 
         case 'cipp_create_group': {
-          const {
-            tenantFilter,
+          const { tenantFilter, displayName, groupType, description, username, primDomain } =
+            args as {
+              tenantFilter: string;
+              displayName: string;
+              groupType: CippGroupType;
+              description?: string;
+              username?: string;
+              primDomain?: string;
+            };
+          result = await this.cippService.createGroup(tenantFilter, {
             displayName,
-            description,
-            securityEnabled,
-            mailEnabled,
-            mailNickname,
-          } = args as {
-            tenantFilter: string;
-            displayName: string;
-            description?: string;
-            securityEnabled?: boolean;
-            mailEnabled?: boolean;
-            mailNickname?: string;
-          };
-          const groupData: Record<string, unknown> = { displayName };
-          if (description !== undefined) groupData.description = description;
-          if (securityEnabled !== undefined) groupData.securityEnabled = securityEnabled;
-          if (mailEnabled !== undefined) groupData.mailEnabled = mailEnabled;
-          if (mailNickname !== undefined) groupData.mailNickname = mailNickname;
-          result = await this.cippService.createGroup(tenantFilter, groupData);
+            groupType,
+            ...(description !== undefined ? { description } : {}),
+            ...(username !== undefined ? { username } : {}),
+            ...(primDomain !== undefined ? { primDomain } : {}),
+          });
           break;
         }
 

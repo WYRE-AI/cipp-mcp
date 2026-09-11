@@ -73,3 +73,85 @@ first — an unmeasured mailbox is not the emptiest one in the tenant.
 Entra *object id*; hand it a UPN and it returns an empty shell rather than an
 error. It has no all-tenants branch, so `allTenants` is rejected client-side.
 `ListMailboxes` with the report DB *does* support `AllTenants`.
+
+## Learnings - 2026-09-11
+
+Adopting a write-verification envelope for the high-risk writes, adapted from
+@pdlaskbis's fork (`pdlaskbis/cipp-mcp`).
+
+**The readback field decides the readback path, not the other way round.**
+`Invoke-ListUsers` applies its explicit `$select` only on the `UserID` branch.
+A `graphFilter` query returns Graph's *default* property set, which contains
+neither `accountEnabled` nor `lastPasswordChangeDateTime` — exactly the two
+fields that prove a disable or a password reset landed. So a UPN-addressed
+readback cannot see what it is looking for, and reports `pending` forever.
+Resolve to an object id first; `readUserById` exists for this.
+
+**Verify against the record's own prior value, not against the clock.**
+`lastPasswordChangeDateTime` is compared to a baseline captured *before* the
+write. Comparing to `Date.now()` would silently depend on three clocks agreeing
+(this process, the CIPP function host, Entra). No readable baseline means no
+advance can be proved — that stays `pending` rather than guessing.
+
+**Not every write has an honest readback, and faking one is worse than
+admitting it.** `signInSessionsValidFromDateTime` is in no property set any CIPP
+read returns, and the only MFA read (`ListMFAUsers`) is a tenant-wide
+cache-backed report that will answer confidently from stale data. Both
+`Remove-CIPPUserMFA` and Graph's `revokeSignInSessions` run inline and throw —
+HTTP 500 — on failure, so their own `Results` is the available evidence. It gets
+parsed, not assumed, and an empty body stays `pending`.
+
+**A failed READ is not a failed WRITE.** The poll loop swallows readback errors
+and keeps going; at the deadline that is `pending` with a recheck instruction.
+Reporting `failed` there would invent a failure that never happened.
+
+**The failure regex needs word anchors.** `ExecResetPass` returns CIPP's
+generated password inside `Results`. An unanchored `/fail/` calls a *successful*
+reset failed the moment a random password happens to contain those four letters.
+Where a newer endpoint returns structured `{ resultText, state }`, `state` is
+authoritative and the text scan is skipped — `ExecResetPass` on a
+directory-synced account succeeds with prose that reads "…will fail if writeback
+is not enabled…".
+
+**Per-endpoint body spellings are not interchangeable, even where PowerShell is
+forgiving.** `ExecResetMFA` forwards the body's `ID` straight through as
+`-UserPrincipalName`, so it wants a UPN and a GUID targets nothing.
+`ExecRevokeSessions` reads lowercase `id` and builds its own result string from
+`Username` — omit it and a successful revoke reports "Successfully revoked
+sessions for " with a blank name, which reads like a failure to a human and to
+an agent. `ExecDisableUser` coerces `Enable` with `[Convert]::ToBoolean`, which
+turns an absent value into `$false`; send the intent explicitly rather than
+betting on upstream never adding a default.
+
+**`New-CIPPGroup` has its own vocabulary.** It derives `securityEnabled`,
+`mailEnabled` and `mailNickname` from `groupType` and reads none of them from
+the request, so Graph-shaped booleans are discarded in silence. A plain Entra
+security group is `Generic`; `Security` means a *mail-enabled* security group.
+`groupType` is mandatory because the cmdlet opens with
+`$GroupObject.groupType.ToLower()`, which throws on a null and surfaces as an
+opaque HTTP 500.
+
+**Testing the poll loop.** `tests/cipp.service.verified-writes.test.ts` drives
+the verification poll under Jest fake timers (the `settle` helper), so a
+`pending` outcome costs no wall-clock time. The mock routes `ListUsers` on
+whether `UserID` is present, which is what separates a resolve from a readback.
+
+**`feat!:` alone does not cut a major in this repo — the footer does.**
+`.releaserc.json` runs `@semantic-release/commit-analyzer` with its default
+**angular** preset, whose header pattern is `/^(\w*)(?:\((.*)\))?: (.*)$/`. That
+pattern does not allow `!`, so `feat!: …` parses with `type: undefined` and the
+exclamation mark is invisible to the analyser. What actually produces the major
+is the `BREAKING CHANGE:` footer, which the parser extracts independently of the
+header. Verified against the installed plugin rather than assumed:
+
+```
+$ node -e "… analyzeCommits({}, { commits: [{ hash, message }] })"
+RELEASE TYPE: major
+```
+
+So on this repo (and any fleet repo on the default preset) a `feat!:` shipped
+*without* a `BREAKING CHANGE:` footer yields a **minor** — precisely the silent
+break the `!` was meant to prevent. Write both: the `!` for humans reading
+`git log`, the footer for the machine. Switching the preset to
+`conventionalcommits` would make `!` load-bearing, but that is a release-config
+change and should be made deliberately, fleet-wide, not as a side effect.

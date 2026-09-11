@@ -46,6 +46,16 @@ const USER_ID_PROP = {
     "The target user's Azure AD object ID or User Principal Name (UPN, e.g. alice@contoso.com).",
 };
 
+/**
+ * Appended to every tool whose result is a verification envelope, so a calling
+ * model reads `status` instead of assuming a returned result means success.
+ */
+const VERIFICATION_NOTE =
+  'Returns a verification envelope: status is "confirmed" only when the change was ' +
+  'proven to have landed, "pending" when CIPP accepted it but it could not be ' +
+  'confirmed, and "failed" when CIPP reported it did not work. Report only a ' +
+  '"confirmed" result as done; for anything else, relay the recheck instruction.';
+
 // ---------------------------------------------------------------------------
 // Tool Definitions
 // ---------------------------------------------------------------------------
@@ -113,7 +123,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     description:
       '⚠ HIGH-IMPACT. Creates a new user account in the tenant, which grants ' +
       'directory presence and may include initial credentials and license/role ' +
-      'eligibility. Reversible by deleting or disabling the user. ' +
+      'eligibility. ' +
+      VERIFICATION_NOTE +
+      ' Reversible by deleting or disabling the user. ' +
       'Confirm with the user before invoking.',
     annotations: {
       title: 'Create user (high-impact)',
@@ -223,8 +235,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: 'cipp_disable_user',
     description:
-      '⚠ HIGH-IMPACT. Disables a user account, blocking sign-in. Reversible by ' +
-      're-enabling the account. Confirm with the user before invoking.',
+      '⚠ HIGH-IMPACT. Disables a user account, blocking sign-in. ' +
+      VERIFICATION_NOTE +
+      ' Reversible by re-enabling the account. Confirm with the user before invoking.',
     annotations: {
       title: 'Disable user (reversible)',
       readOnlyHint: false,
@@ -244,8 +257,11 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: 'cipp_reset_password',
     description:
-      '⚠ HIGH-IMPACT. Resets a user\'s password, invalidating their current ' +
-      'password. Reversible by setting a new password. Confirm with the user before invoking.',
+      '⚠ HIGH-IMPACT. Resets a user\'s password to one CIPP generates, invalidating ' +
+      'their current password. You cannot choose the password: CIPP generates it and ' +
+      'returns it in submission.Results. ' +
+      VERIFICATION_NOTE +
+      ' Reversible by resetting again. Confirm with the user before invoking.',
     annotations: {
       title: 'Reset password (reversible)',
       readOnlyHint: false,
@@ -258,10 +274,10 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       properties: {
         tenantFilter: TENANT_FILTER_PROP,
         userId: USER_ID_PROP,
-        newPassword: {
-          type: 'string',
+        mustChangeAtNextSignIn: {
+          type: 'boolean',
           description:
-            'The replacement password to set. If omitted, a random password is generated and returned in the response.',
+            'Force the user to choose a new password at next sign-in. Defaults to false. Ignored for directory-synced accounts, where the reset goes via password writeback and a change is always enforced.',
         },
       },
       required: ['tenantFilter', 'userId'],
@@ -271,7 +287,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: 'cipp_reset_mfa',
     description:
       '⚠ HIGH-IMPACT. Resets all MFA methods for a user, requiring them to ' +
-      're-register their authentication methods. Reversible by re-enabling MFA. Confirm with the user before invoking.',
+      're-register their authentication methods. ' +
+      VERIFICATION_NOTE +
+      ' Confirm with the user before invoking.',
     annotations: {
       title: 'Reset MFA (reversible)',
       readOnlyHint: false,
@@ -292,7 +310,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: 'cipp_revoke_sessions',
     description:
       '⚠ HIGH-IMPACT. Revokes all active sessions for a user, forcing them to ' +
-      're-authenticate. Reversible by the user signing in again. Confirm with the user before invoking.',
+      're-authenticate. ' +
+      VERIFICATION_NOTE +
+      ' Reversible by the user signing in again. Confirm with the user before invoking.',
     annotations: {
       title: 'Revoke sessions (reversible)',
       readOnlyHint: false,
@@ -531,27 +551,36 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           type: 'string',
           description: 'Human-readable name for the new group.',
         },
+        groupType: {
+          type: 'string',
+          enum: [
+            'Generic',
+            'Security',
+            'M365',
+            'Distribution',
+            'DynamicDistribution',
+            'AzureRole',
+            'Dynamic',
+          ],
+          description:
+            'The kind of group to create, in CIPP\'s vocabulary. "Generic" is a plain Entra security group — the usual choice for RBAC and Conditional Access. "Security" means a MAIL-ENABLED security group. "M365" is a Microsoft 365 group. CIPP derives mail-enablement and the alias from this value, so it is required.',
+        },
         description: {
           type: 'string',
           description: 'Optional free-text description of the group purpose.',
         },
-        securityEnabled: {
-          type: 'boolean',
-          description:
-            'When true, the group can be used for security policy assignments (RBAC, Conditional Access, etc.).',
-        },
-        mailEnabled: {
-          type: 'boolean',
-          description:
-            'When true, the group is mail-enabled and can receive email. Required for Microsoft 365 groups.',
-        },
-        mailNickname: {
+        username: {
           type: 'string',
           description:
-            'The mail alias used as the local part of the group email address (e.g. "finance-team" for finance-team@contoso.com). Required when mailEnabled is true.',
+            'The mail alias used as the local part of the group address (e.g. "finance-team" for finance-team@contoso.com). Required for the mail-enabled types: M365, Distribution, DynamicDistribution and Security.',
+        },
+        primDomain: {
+          type: 'string',
+          description:
+            'Domain to use for the group address (e.g. "contoso.com"). Defaults to the tenant default domain when omitted.',
         },
       },
-      required: ['tenantFilter', 'displayName'],
+      required: ['tenantFilter', 'displayName', 'groupType'],
     },
   },
 

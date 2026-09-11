@@ -35,6 +35,31 @@ interface CippServiceConfig {
   };
 }
 
+/**
+ * Group kinds CIPP's `New-CIPPGroup` normalises to. `Generic`, `AzureRole`,
+ * `Dynamic` and `M365` are created through Graph; `Distribution`,
+ * `DynamicDistribution` and `Security` through Exchange Online.
+ */
+export const CIPP_GROUP_TYPES = [
+  'Generic',
+  'Security',
+  'M365',
+  'Distribution',
+  'DynamicDistribution',
+  'AzureRole',
+  'Dynamic',
+] as const;
+
+export type CippGroupType = (typeof CIPP_GROUP_TYPES)[number];
+
+/** The group kinds CIPP needs a mail alias (`username`) for. */
+const MAIL_ENABLED_GROUP_TYPES: readonly CippGroupType[] = [
+  'M365',
+  'Distribution',
+  'DynamicDistribution',
+  'Security',
+];
+
 /** Aggregated DNS health for a single domain (SPF / DMARC / DKIM). */
 export interface DomainHealthCheck {
   domain: string;
@@ -52,6 +77,49 @@ export interface DomainHealthCheck {
 const DOMAIN_HEALTH_CHECK_TIMEOUT_MS = 15_000;
 
 /**
+ * The three honest outcomes of a CIPP write.
+ *
+ * - `confirmed` — a readback proved the change is live in Microsoft, or CIPP
+ *   completed the operation inline and reported no failure.
+ * - `pending`   — CIPP accepted the write but it could not be confirmed within
+ *   the verification budget. NOT a success. Also not a proven failure.
+ * - `failed`    — CIPP itself reported the operation did not work.
+ */
+export type WriteStatus = 'confirmed' | 'pending' | 'failed';
+
+/**
+ * The envelope every verified CIPP write returns.
+ *
+ * It answers the question the technician actually has — "did this land in
+ * Microsoft?" — rather than the one CIPP answers, which is "did I accept the
+ * job?". `status` is never `confirmed` on the strength of an acknowledgement
+ * alone, and `message` never claims success unless it is.
+ */
+export interface VerifiedWrite {
+  status: WriteStatus;
+  /** The concrete field or read that would prove the change (e.g. `accountEnabled`). */
+  verifiedBy: string;
+  /** Human-facing summary. Never claims success while `status !== 'confirmed'`. */
+  message: string;
+  /** How to confirm by hand. Null once confirmed. */
+  recheck: string | null;
+  /** Failure strings CIPP reported inside a nominally successful response. */
+  failures: string[];
+  /** CIPP's raw acknowledgement, kept for auditing. */
+  submission: unknown;
+}
+
+/**
+ * Total polling budget (ms) for a write readback, and the delay between polls.
+ *
+ * Directory changes propagate in seconds, not instantly. The budget is kept
+ * well under a typical MCP gateway tool-call deadline: a slow change should
+ * return an honest `pending` rather than time the whole tool call out.
+ */
+const WRITE_VERIFY_TIMEOUT_MS = 30_000;
+const WRITE_VERIFY_INTERVAL_MS = 3_000;
+
+/**
  * CIPP's failure vocabulary as it appears inside a `Results` payload.
  *
  * Several CIPP entrypoints (`Invoke-EditUser`, `Invoke-AddScheduledItem`,
@@ -59,12 +127,23 @@ const DOMAIN_HEALTH_CHECK_TIMEOUT_MS = 15_000;
  * strings in `Results`, so a `response.ok` check alone reports success on
  * failure.
  */
+// Each alternative is anchored to a word boundary so the scan cannot fire on a
+// fragment inside opaque content. `ExecResetPass` returns the generated password
+// in `Results`; an unanchored /fail/ would report a successful reset as failed
+// the moment a random string happened to contain those four letters.
 const CIPP_FAILURE_RE =
-  /fail|error|could not|unable|not permitted|already exists|does not exist/i;
+  /\b(fail|error|could not|unable|not permitted|already exists|does not exist)/i;
 
 /**
  * Normalise a CIPP `Results` payload — a string, an array, or absent — into
  * strings, and flag the entries that report a failure. Parse, never assume.
+ *
+ * Newer CIPP endpoints return a structured `{ resultText, state }` object
+ * instead of a bare string. Where `state` is present it is authoritative and
+ * the text scan is skipped, because the text is prose that discusses failure
+ * without reporting one — `ExecResetPass` on a directory-synced account
+ * succeeds with a `resultText` that reads "…will fail if writeback is not
+ * enabled…", which a keyword scan would call a failure.
  */
 function interpretResults(raw: unknown): { results: string[]; failures: string[] } {
   let entries: unknown[];
@@ -77,8 +156,39 @@ function interpretResults(raw: unknown): { results: string[]; failures: string[]
     entries = [raw];
   }
 
-  const results = entries.map((r) => (typeof r === 'string' ? r : JSON.stringify(r)));
-  return { results, failures: results.filter((r) => CIPP_FAILURE_RE.test(r)) };
+  const results: string[] = [];
+  const failures: string[] = [];
+
+  for (const entry of entries) {
+    const structured =
+      typeof entry === 'object' && entry !== null
+        ? (entry as { resultText?: unknown; state?: unknown })
+        : undefined;
+    const state = typeof structured?.state === 'string' ? structured.state : undefined;
+    const text =
+      typeof entry === 'string'
+        ? entry
+        : typeof structured?.resultText === 'string'
+          ? structured.resultText
+          : JSON.stringify(entry);
+
+    results.push(text);
+    if (state !== undefined ? state !== 'success' : CIPP_FAILURE_RE.test(text)) {
+      failures.push(text);
+    }
+  }
+
+  return { results, failures };
+}
+
+/**
+ * Parse a Graph timestamp to epoch milliseconds, or `undefined` if it is
+ * absent or unparseable. Used to compare a field against its own prior value.
+ */
+function timestampOf(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? undefined : ms;
 }
 
 /**
@@ -621,6 +731,86 @@ export class CippService {
     }
   }
 
+  /**
+   * Run a mutating CIPP call and report what actually happened, as a
+   * {@link VerifiedWrite}.
+   *
+   * CIPP's acknowledgement is not proof. Two behaviours make a bare HTTP 200
+   * unsafe to relay as success:
+   *   1. Several entrypoints hardcode 200 and report the failure only as a
+   *      string inside `Results` (the `Set-CIPPUser` trap).
+   *   2. Several return the moment the job is ACCEPTED, before the change
+   *      exists in Microsoft.
+   *
+   * So this helper parses `Results` for CIPP's own failure vocabulary first —
+   * a reported failure is `failed`, and there is nothing to wait for — and
+   * otherwise polls a Microsoft-side readback until it confirms the change or
+   * the budget runs out. A readback that throws counts as "not yet": a failed
+   * READ is not a failed WRITE, so we keep polling and, at the deadline,
+   * return `pending` with a recheck instruction rather than a false success.
+   *
+   * @param run        Executes the write. Its response becomes `submission`.
+   * @param readback   Returns true once Microsoft reflects the change. Omit ONLY
+   *                   when CIPP performs the change inline (returning HTTP 500 on
+   *                   failure, which {@link request} throws on) and no CIPP read
+   *                   exposes the changed field — then reaching a non-failing
+   *                   `Results` IS the confirmation, and an empty `Results`,
+   *                   which proves nothing, stays `pending`.
+   * @param verifiedBy The field or read that proves the change.
+   * @param confirmed  Message to use once confirmed.
+   * @param recheck    How to confirm by hand when it is not.
+   */
+  private async verifyWrite(opts: {
+    run: () => Promise<{ Results?: unknown } | undefined>;
+    readback?: () => Promise<boolean>;
+    verifiedBy: string;
+    confirmed: string;
+    recheck: string;
+    timeoutMs?: number;
+    intervalMs?: number;
+  }): Promise<VerifiedWrite> {
+    const submission = await opts.run();
+    const { results, failures } = interpretResults(submission?.Results);
+
+    const envelope = (status: WriteStatus): VerifiedWrite => ({
+      status,
+      verifiedBy: opts.verifiedBy,
+      message:
+        status === 'confirmed'
+          ? opts.confirmed
+          : `${opts.recheck} Do NOT report this to the caller as done.`,
+      recheck: status === 'confirmed' ? null : opts.recheck,
+      failures,
+      submission,
+    });
+
+    if (failures.length > 0) {
+      return envelope('failed');
+    }
+
+    if (!opts.readback) {
+      // CIPP ran the change inline and did not report a failure. An empty
+      // `Results` is inconclusive, so it does not earn a confirmation.
+      return envelope(results.length > 0 ? 'confirmed' : 'pending');
+    }
+
+    const intervalMs = opts.intervalMs ?? WRITE_VERIFY_INTERVAL_MS;
+    const deadline = Date.now() + (opts.timeoutMs ?? WRITE_VERIFY_TIMEOUT_MS);
+
+    // Always read back at least once, then poll until the deadline.
+    for (;;) {
+      let confirmed = false;
+      try {
+        confirmed = await opts.readback();
+      } catch {
+        // A failed READ is not a failed WRITE. Stay unconfirmed and keep polling.
+      }
+      if (confirmed) return envelope('confirmed');
+      if (Date.now() >= deadline) return envelope('pending');
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Core
   // -------------------------------------------------------------------------
@@ -734,11 +924,44 @@ export class CippService {
    * @param tenantFilter - Tenant domain or identifier.
    * @param userData     - User properties to set (displayName, UPN, password, etc.).
    */
-  async createUser<T = unknown>(
+  async createUser(
     tenantFilter: string,
     userData: Record<string, unknown>
-  ): Promise<T> {
-    return this.request<T>('POST', 'AddUser', undefined, { tenantFilter, ...userData });
+  ): Promise<VerifiedWrite> {
+    // `New-CippUser` builds the UPN as "<username>@<Domain>" and never reads a
+    // whole `userPrincipalName`. Passing one through leaves both halves empty,
+    // so CIPP posts "@" to Graph and fails on the domain portion.
+    const upn = typeof userData.userPrincipalName === 'string' ? userData.userPrincipalName : '';
+    const at = upn.lastIndexOf('@');
+    if (at <= 0 || at === upn.length - 1) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `userPrincipalName must be a full UPN (e.g. alice@contoso.com); got "${upn}". CIPP builds the UPN from separate username and Domain fields and cannot recover them from a partial value.`
+      );
+    }
+    const { userPrincipalName: _upn, ...rest } = userData;
+
+    return this.verifyWrite({
+      run: () =>
+        this.request('POST', 'AddUser', undefined, {
+          tenantFilter,
+          username: upn.slice(0, at),
+          Domain: upn.slice(at + 1),
+          ...rest,
+        }),
+      verifiedBy: 'userPrincipalName present in ListUsers',
+      readback: async () => {
+        const users = await this.listUsers<Array<{ userPrincipalName?: string }>>(tenantFilter, {
+          searchField: 'userPrincipalName',
+          searchValue: upn,
+        });
+        return (Array.isArray(users) ? users : []).some(
+          (u) => u?.userPrincipalName?.toLowerCase() === upn.toLowerCase()
+        );
+      },
+      confirmed: `User ${upn} confirmed present in ${tenantFilter}. Note that CIPP applies licences, group adds and mailbox grants after creation and reports their failures as strings in submission.Results — check those before calling the account fully provisioned.`,
+      recheck: `CIPP accepted AddUser for ${upn}, but the account was not visible in ${tenantFilter} within the verification window. Re-check with cipp_list_users before telling anyone the account exists.`,
+    });
   }
 
   /**
@@ -790,6 +1013,26 @@ export class CippService {
 
     const at = upn.lastIndexOf('@');
     return { id, userPrincipalName: upn, username: upn.slice(0, at), domain: upn.slice(at + 1) };
+  }
+
+  /**
+   * Read one user back by object id, for verifying a write.
+   *
+   * The `UserID` path is the one that matters: `Invoke-ListUsers` applies its
+   * explicit `$select` there, which is what returns `accountEnabled` and
+   * `lastPasswordChangeDateTime`. A `graphFilter` query returns Graph's default
+   * property set, which omits both — so a UPN-based readback silently cannot
+   * see the fields that prove a disable or a password reset landed.
+   */
+  private async readUserById<T = Record<string, unknown>>(
+    tenantFilter: string,
+    id: string
+  ): Promise<T | undefined> {
+    const rows = await this.request<Array<Record<string, unknown>>>('GET', 'ListUsers', {
+      tenantFilter,
+      UserID: id,
+    });
+    return (Array.isArray(rows) ? (rows[0] as T | undefined) : undefined) ?? undefined;
   }
 
   /**
@@ -857,35 +1100,105 @@ export class CippService {
 
   /**
    * Disable a user account, preventing sign-in.
-   * Calls the `ExecDisableUser` Azure Function.
+   * Calls the `ExecDisableUser` Azure Function, then confirms by readback.
    *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param userId       - Azure AD object ID of the user to disable.
+   * @param userId       - Object id or UPN of the user to disable.
    */
-  async disableUser<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
-    return this.request<T>('POST', 'ExecDisableUser', undefined, {
+  async disableUser(tenantFilter: string, userId: string): Promise<VerifiedWrite> {
+    // Resolve first: the readback needs an object id, because `accountEnabled`
+    // only comes back on ListUsers' by-id path (see readUserById).
+    const { id, userPrincipalName } = await this.resolveUserIdentity(
       tenantFilter,
-      ID: userId,
+      userId,
+      'Refusing to disable: without the account\'s object id the result cannot be read back, and CIPP\'s acknowledgement alone does not prove the account was disabled.'
+    );
+
+    return this.verifyWrite({
+      // `Enable` is coerced with [Convert]::ToBoolean, which turns an absent
+      // value into $false. Relying on that is a coin-flip on CIPP never adding
+      // a default; send the intent explicitly.
+      run: () =>
+        this.request('POST', 'ExecDisableUser', undefined, {
+          tenantFilter,
+          ID: id,
+          Enable: false,
+        }),
+      verifiedBy: 'accountEnabled',
+      readback: async () => {
+        const user = await this.readUserById<{ accountEnabled?: boolean }>(tenantFilter, id);
+        return user?.accountEnabled === false;
+      },
+      confirmed: `Sign-in disabled for ${userPrincipalName} in ${tenantFilter} — confirmed by readback (accountEnabled=false).`,
+      recheck: `CIPP accepted ExecDisableUser for ${userPrincipalName}, but accountEnabled was not observed false within the verification window. Re-read the account with cipp_list_users before telling anyone it is disabled.`,
     });
   }
 
   /**
-   * Reset a user's password.
-   * Calls the `ExecResetPass` Azure Function.
+   * Reset a user's password to one CIPP generates, and confirm by readback.
+   *
+   * CIPP always generates the password itself (`New-passwordString`) and
+   * returns it in the response. `Invoke-ExecResetPass` reads only
+   * `tenantFilter`, `ID`, `MustChange` and `displayName` — there is no input
+   * field for a chosen password, so supplying one is rejected here rather than
+   * silently dropped. Handing a caller a password the tenant never received is
+   * the worst failure this tool could have.
    *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param userId       - Azure AD object ID of the user.
-   * @param newPassword  - Optional explicit password; omit to let CIPP generate one.
+   * @param userId       - Object id or UPN of the user.
+   * @param options      - Optional behaviour flags.
+   * @param options.mustChangeAtNextSignIn - Force a change at next sign-in.
+   * @param options.newPassword - Not supported by CIPP; rejected if supplied.
    */
-  async resetPassword<T = unknown>(
+  async resetPassword(
     tenantFilter: string,
     userId: string,
-    newPassword?: string
-  ): Promise<T> {
-    return this.request<T>('POST', 'ExecResetPass', undefined, {
+    options?: { mustChangeAtNextSignIn?: boolean; newPassword?: string }
+  ): Promise<VerifiedWrite> {
+    if (options?.newPassword !== undefined) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'CIPP does not accept a chosen password. Invoke-ExecResetPass generates one itself and ignores any password in the request body, so honouring this would report a password the tenant never set. Re-run without newPassword and read the generated password out of the response.'
+      );
+    }
+
+    const { id, userPrincipalName } = await this.resolveUserIdentity(
       tenantFilter,
-      ID: userId,
-      ...(newPassword && { newPassword }),
+      userId,
+      'Refusing to reset: without the account\'s object id the result cannot be read back, and CIPP\'s acknowledgement alone does not prove the password changed.'
+    );
+
+    // Capture the account's own prior timestamp and verify against an ADVANCE.
+    // Comparing to "now" would depend on clock agreement between this process,
+    // CIPP and Entra; comparing to the account's previous value does not.
+    const before = await this.readUserById<{ lastPasswordChangeDateTime?: string }>(
+      tenantFilter,
+      id
+    );
+    const baseline = timestampOf(before?.lastPasswordChangeDateTime);
+
+    return this.verifyWrite({
+      run: () =>
+        this.request('POST', 'ExecResetPass', undefined, {
+          tenantFilter,
+          ID: id,
+          displayName: userPrincipalName,
+          MustChange: options?.mustChangeAtNextSignIn === true,
+        }),
+      verifiedBy: 'lastPasswordChangeDateTime',
+      readback: async () => {
+        // No readable baseline means no advance can be proved. Staying
+        // unconfirmed is the honest outcome; the recheck instruction covers it.
+        if (baseline === undefined) return false;
+        const after = await this.readUserById<{ lastPasswordChangeDateTime?: string }>(
+          tenantFilter,
+          id
+        );
+        const changed = timestampOf(after?.lastPasswordChangeDateTime);
+        return changed !== undefined && changed > baseline;
+      },
+      confirmed: `Password reset for ${userPrincipalName} in ${tenantFilter} — confirmed by readback (lastPasswordChangeDateTime advanced). CIPP's generated password is in submission.Results.`,
+      recheck: `CIPP accepted ExecResetPass for ${userPrincipalName}, but lastPasswordChangeDateTime was not observed to advance within the verification window. On a directory-synced account that is expected: CIPP submits the reset via password writeback, which applies asynchronously and fails outright if writeback is disabled or the on-premises policy rejects the password. Re-read the account with cipp_list_users before giving anyone the new password.`,
     });
   }
 
@@ -893,13 +1206,37 @@ export class CippService {
    * Reset all registered MFA methods for a user.
    * Calls the `ExecResetMFA` Azure Function.
    *
+   * `Invoke-ExecResetMFA` passes the body's `ID` straight through as
+   * `-UserPrincipalName`, so this endpoint wants a UPN. An object id is
+   * resolved first rather than forwarded, which would fail on every
+   * GUID-addressed call.
+   *
+   * No readback: the only CIPP read of MFA state is `ListMFAUsers`, a
+   * tenant-wide cache-backed report, and a stale cache would produce a
+   * confident wrong answer either way. `Remove-CIPPUserMFA` deletes each method
+   * inline and throws — HTTP 500 — on any failure, including a partial one, so
+   * its own result is the available evidence. {@link verifyWrite} parses that
+   * result rather than assuming it.
+   *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param userId       - Azure AD object ID of the user.
+   * @param userId       - Object id or UPN of the user.
    */
-  async resetMFA<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
-    return this.request<T>('POST', 'ExecResetMFA', undefined, {
+  async resetMFA(tenantFilter: string, userId: string): Promise<VerifiedWrite> {
+    const { userPrincipalName } = await this.resolveUserIdentity(
       tenantFilter,
-      ID: userId,
+      userId,
+      'Refusing to reset MFA: CIPP addresses the account by UPN on this endpoint, and forwarding an unresolved object id would target nothing.'
+    );
+
+    return this.verifyWrite({
+      run: () =>
+        this.request('POST', 'ExecResetMFA', undefined, {
+          tenantFilter,
+          ID: userPrincipalName,
+        }),
+      verifiedBy: 'ExecResetMFA result (Remove-CIPPUserMFA runs inline)',
+      confirmed: `MFA methods reset for ${userPrincipalName} in ${tenantFilter} — CIPP completed the removal and reported no failure. The user must re-register at next sign-in.`,
+      recheck: `CIPP did not report a clear success for ExecResetMFA on ${userPrincipalName}. Check the user's registered methods in the CIPP MFA report before telling anyone MFA was reset.`,
     });
   }
 
@@ -907,13 +1244,39 @@ export class CippService {
    * Revoke all active sign-in sessions for a user.
    * Calls the `ExecRevokeSessions` Azure Function.
    *
+   * No readback: the field that records a revoke,
+   * `signInSessionsValidFromDateTime`, is not in the property set any CIPP read
+   * returns. `Invoke-ExecRevokeSessions` calls Graph's `revokeSignInSessions`
+   * inline and returns HTTP 500 on failure, so its own result is the available
+   * evidence — parsed, not assumed. Faking a readback here would be worse than
+   * admitting there isn't one.
+   *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param userId       - Azure AD object ID of the user.
+   * @param userId       - Object id or UPN of the user.
    */
-  async revokeSessions<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
-    return this.request<T>('POST', 'ExecRevokeSessions', undefined, {
+  async revokeSessions(tenantFilter: string, userId: string): Promise<VerifiedWrite> {
+    // CIPP builds its result string from `Username`; without it a successful
+    // revoke reports "Successfully revoked sessions for " with a blank name,
+    // which reads to a human (and to an agent) like a failure.
+    const { id, userPrincipalName } = await this.resolveUserIdentity(
       tenantFilter,
-      ID: userId,
+      userId,
+      'Refusing to revoke: CIPP names the account in its own result string from the Username field, and omitting it returns a blank confirmation that cannot be distinguished from a failure.'
+    );
+
+    return this.verifyWrite({
+      // Lowercase `id` is the spelling `Invoke-ExecRevokeSessions` reads; the
+      // sibling Exec endpoints read `ID`. PowerShell resolves either, but
+      // matching upstream keeps this auditable against the function it calls.
+      run: () =>
+        this.request('POST', 'ExecRevokeSessions', undefined, {
+          tenantFilter,
+          id,
+          Username: userPrincipalName,
+        }),
+      verifiedBy: 'ExecRevokeSessions result (Graph revokeSignInSessions runs inline)',
+      confirmed: `Sign-in sessions revoked for ${userPrincipalName} in ${tenantFilter} — CIPP completed the revoke and reported no failure.`,
+      recheck: `CIPP did not report a clear success for ExecRevokeSessions on ${userPrincipalName}. Re-run the revoke before telling anyone the sessions are gone.`,
     });
   }
 
@@ -1072,17 +1435,55 @@ export class CippService {
   }
 
   /**
-   * Create a new Azure AD group in a tenant.
+   * Create a new group in a tenant.
    * Calls the `AddGroup` Azure Function.
    *
+   * CIPP derives `securityEnabled`, `mailEnabled` and `mailNickname` from
+   * `groupType` and reads none of them from the request, so Graph-shaped
+   * booleans are silently discarded. `groupType` itself is mandatory:
+   * `New-CIPPGroup` opens with `$GroupObject.groupType.ToLower()`, which throws
+   * on a null and surfaces as an opaque HTTP 500.
+   *
+   * Note CIPP's vocabulary: a plain Entra security group is `Generic`.
+   * `Security` means a mail-enabled security group created through Exchange.
+   *
    * @param tenantFilter - Tenant domain or identifier.
-   * @param groupData    - Group properties (displayName, groupType, etc.).
+   * @param groupData    - Group properties in CIPP's own shape.
    */
   async createGroup<T = unknown>(
     tenantFilter: string,
-    groupData: Record<string, unknown>
+    groupData: {
+      displayName: string;
+      groupType: CippGroupType;
+      description?: string;
+      username?: string;
+      primDomain?: string;
+    }
   ): Promise<T> {
-    return this.request<T>('POST', 'AddGroup', undefined, { tenantFilter, ...groupData });
+    if (!CIPP_GROUP_TYPES.includes(groupData.groupType)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `groupType must be one of ${CIPP_GROUP_TYPES.join(', ')}; got "${groupData.groupType}". CIPP calls groupType.ToLower() unconditionally and returns an opaque HTTP 500 without it.`
+      );
+    }
+    if (MAIL_ENABLED_GROUP_TYPES.includes(groupData.groupType) && !groupData.username) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `groupType "${groupData.groupType}" is mail-enabled, so CIPP needs "username" — the local part of the group's address — to build it.`
+      );
+    }
+
+    const body: Record<string, unknown> = {
+      tenantFilter,
+      displayName: groupData.displayName,
+      groupType: groupData.groupType,
+    };
+    if (groupData.description !== undefined) body.description = groupData.description;
+    if (groupData.username !== undefined) body.username = groupData.username;
+    // Read as `$GroupObject.primDomain.value`, not as a bare string.
+    if (groupData.primDomain !== undefined) body.primDomain = { value: groupData.primDomain };
+
+    return this.request<T>('POST', 'AddGroup', undefined, body);
   }
 
   // -------------------------------------------------------------------------

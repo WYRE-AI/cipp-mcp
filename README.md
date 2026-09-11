@@ -135,6 +135,49 @@ Two caveats worth knowing:
   counts are accurate to roughly 10 MB. Quotas are exact — they are recovered
   from the raw `Get-Mailbox` string, which carries the true byte count.
 
+### Verified writes
+
+CIPP's response to a write answers "did I accept the job?", not "did the change
+land?". Several entrypoints hardcode HTTP 200 and report failure only as a
+string in `Results`; others return the moment a job is queued. Relaying that as
+success is how an agent ends up telling a technician a password was reset when
+it silently was not.
+
+The highest-risk writes — `disable_user`, `reset_password`, `reset_mfa`,
+`revoke_sessions` and `create_user` — therefore return a verification envelope
+rather than CIPP's raw response:
+
+| Field        | Meaning                                                            |
+| ------------ | ------------------------------------------------------------------ |
+| `status`     | `confirmed`, `pending` or `failed` — see below                      |
+| `verifiedBy` | The field or read that would prove the change                       |
+| `message`    | Human-facing summary; never claims success unless `confirmed`       |
+| `recheck`    | How to confirm by hand. `null` once confirmed                       |
+| `failures`   | Failure strings CIPP reported inside a nominally successful reply   |
+| `submission` | CIPP's raw acknowledgement, kept verbatim for auditing              |
+
+- **`confirmed`** — a readback proved the change is live in Microsoft, or CIPP
+  completed the operation inline and reported no failure. Only this counts as
+  done.
+- **`pending`** — CIPP accepted the write but it could not be confirmed within
+  the verification budget (30s, polled every 3s). **Not a success, and not a
+  proven failure.** Relay `recheck` rather than reporting the write as done.
+- **`failed`** — CIPP itself reported the operation did not work.
+
+`disable_user` verifies `accountEnabled` is `false`; `reset_password` verifies
+`lastPasswordChangeDateTime` advanced past the account's own prior value;
+`create_user` verifies the account is visible in `ListUsers`. `reset_mfa` and
+`revoke_sessions` have no honest readback — `signInSessionsValidFromDateTime` is
+in no property set CIPP returns, and the only MFA read is a cache-backed
+tenant-wide report — so they confirm from their own inline result instead of
+faking one, and an empty result stays `pending`.
+
+Two notes on `reset_password`: CIPP generates the password itself and ignores
+any supplied one, so the tool has no `newPassword` parameter and returns the
+generated password in `submission.Results`. On a directory-synced account the
+reset goes via password writeback and applies asynchronously, so `pending` is
+the expected outcome there.
+
 ### CIPP version compatibility
 
 Request bodies are shaped against CIPP's own `Invoke-*.ps1` handlers and are
@@ -150,7 +193,8 @@ the server sends the form both accept. Three behaviours are worth knowing:
 - **Some endpoints report failure under HTTP 200.** `EditUser`,
   `AddScheduledItem` and `ExecOffboardUser` return error text in `Results`
   rather than an error status. These tools parse `Results` and return
-  `status: "failed"`; do not treat a 200 as success.
+  `status: "failed"`; do not treat a 200 as success. The same trap is what the
+  verification envelope above exists for.
 - **Two parameters need a recent CIPP.** `offboard_user`'s
   `DisableOneDriveSharing` and `set_out_of_office`'s `timezone` are ignored by
   older builds rather than erroring — so an offboarding that selects *only*

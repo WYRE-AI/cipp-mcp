@@ -10,6 +10,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Enforce conduit gateway service-to-service verification on every `/mcp` request** (gateway#377 parity). The gateway signs an `X-Gateway-S2S` header on each proxied request; this container now verifies it, closing a confused-deputy gap where a compromised sibling sidecar in the shared ACA environment could otherwise impersonate the gateway to this container. Verification (`src/s2s-verify.ts`, `verifyS2sHeader`) is a near-verbatim port of conduit's own `verifyS2sHeader` (`src/proxy/s2s.ts`) and is checked in `startHttpTransport()` at the very top of the `/mcp` handler — before the POST-method check and before any OAuth-triple/static-key credential extraction. Controlled by `CONDUIT_S2S_SECRET`: empty (default) disables enforcement, matching pre-provisioning behavior exactly; non-empty rejects any request without a valid, freshly-signed header with `401`. `/health` is unauthenticated as before.
 
+### Changed — BREAKING
+
+**This release changes the result shape of five tools and the input schema of two.**
+Any consumer reading these tool results or calling these parameters must be updated:
+
+1. **Changed result shape** — `cipp_disable_user`, `cipp_reset_password`, `cipp_reset_mfa`,
+   `cipp_revoke_sessions` and `cipp_create_user` no longer return CIPP's raw response.
+   They return a verification envelope, `{ status, verifiedBy, message, recheck, failures, submission }`.
+   **Consumers must read `status` and treat only `confirmed` as done.** The previous
+   raw response is unchanged and still available at `submission`, so a consumer that
+   only needs the old payload can substitute `submission` for the whole result.
+2. **`cipp_reset_password` removed the `newPassword` parameter.** A call that still
+   sends it is now rejected with an error rather than silently ignored. Consumers must
+   drop the parameter and read CIPP's generated password out of `submission.Results`.
+   Optional `mustChangeAtNextSignIn` is added.
+3. **`cipp_create_group` replaced `securityEnabled`, `mailEnabled` and `mailNickname`**
+   with a required `groupType` plus optional `username` and `primDomain`. Consumers must
+   map their old booleans onto a `groupType` value — note that a plain Entra security
+   group is `Generic`, not `Security`.
+
+Released as a major version deliberately. Ten accounts have forked this repository and
+several carry their own commits on top, so a changed result shape shipped as a minor
+bump would break named downstream consumers silently.
+
+- **High-impact writes now return a verification envelope instead of CIPP's acknowledgement.** CIPP answers "did I accept the job?", not "did the change land?" — several entrypoints hardcode HTTP 200 and report failure only as a string in `Results`, and others return the moment a job is queued. Relaying that as success is how an agent tells a technician a password was reset when it silently was not. Every affected tool now returns `{ status, verifiedBy, message, recheck, failures, submission }`, where `status` is one of:
+  - `confirmed` — a readback proved the change is live in Microsoft, or CIPP completed the operation inline and reported no failure;
+  - `pending` — CIPP accepted the write but it could not be confirmed inside the verification budget. **Not a success, and not a proven failure.** `message` says so in as many words and `recheck` carries the manual confirmation step;
+  - `failed` — CIPP itself reported the operation did not work.
+
+  **Breaking:** these tools previously returned CIPP's raw response. The raw response is still present, verbatim, as `submission`. Adapted from work by @pdlaskbis in [pdlaskbis/cipp-mcp](https://github.com/pdlaskbis/cipp-mcp); both projects are Apache-2.0.
+
+  - **`cipp_disable_user`** verifies by reading `accountEnabled` back as `false`. The account is resolved to its object id first, because `Invoke-ListUsers` applies its explicit `$select` only on the `UserID` path — a UPN-addressed read returns Graph's default property set, which omits the very field that proves the disable. `Enable: false` is now sent explicitly rather than relying on `[Convert]::ToBoolean($null)`.
+  - **`cipp_reset_password`** verifies that `lastPasswordChangeDateTime` advanced past the account's *own* prior value, captured before the write — comparing against "now" would depend on clock agreement between this process, CIPP and Entra. On a directory-synced account the reset goes via password writeback and applies asynchronously, so `pending` there is expected and the recheck text says why.
+  - **`cipp_reset_mfa`** and **`cipp_revoke_sessions`** have no honest readback and do not fake one. `signInSessionsValidFromDateTime` is in no property set CIPP returns, and the only MFA read is a tenant-wide cache-backed report that would answer confidently from stale data. Both underlying cmdlets run inline and return HTTP 500 on failure, so their own `Results` is the available evidence — parsed, never assumed. An empty body stays `pending` rather than being read as success.
+  - **`cipp_create_user`** verifies the account is visible in `ListUsers` afterwards. Note that CIPP applies licences, group adds and mailbox grants *after* creation and reports those failures as strings in `submission.Results`, so a confirmed create is not necessarily a fully provisioned account; the message says so.
+  - Readback failures count as "not yet", never as a failed write: a read that throws keeps the poll going and ends as `pending` with a recheck instruction, rather than reporting a failure that did not happen.
+  - CIPP's failure vocabulary is now matched on word boundaries, and a structured `{ resultText, state }` result is trusted over the text scan. Both guard against false failures: `ExecResetPass` returns the generated password in `Results`, and an unanchored `/fail/` would call a successful reset failed the moment a random password contained those four letters.
+- **`cipp_reset_password` no longer accepts `newPassword`.** `Invoke-ExecResetPass` reads only `tenantFilter`, `ID`, `MustChange` and `displayName`; it generates the password itself and ignores any supplied one. Honouring the parameter meant handing a caller a password the tenant never set. A call that still sends it is now rejected loudly rather than silently dropped, and the generated password is returned in `submission.Results`. New optional `mustChangeAtNextSignIn` maps to CIPP's `MustChange`.
+- **`cipp_create_group` now takes CIPP's own group vocabulary.** `New-CIPPGroup` derives `securityEnabled`, `mailEnabled` and `mailNickname` from a single `groupType` and reads none of them from the request, so the previous Graph-shaped booleans were silently discarded. **Breaking:** `securityEnabled`, `mailEnabled` and `mailNickname` are replaced by a required `groupType` (`Generic`, `Security`, `M365`, `Distribution`, `DynamicDistribution`, `AzureRole`, `Dynamic`), plus `username` (the mail alias) and `primDomain`. Note CIPP's vocabulary: a plain Entra security group is `Generic`; `Security` means a *mail-enabled* security group. `groupType` is required because `New-CIPPGroup` opens with `$GroupObject.groupType.ToLower()`, which throws on a null and surfaces as an opaque HTTP 500. `primDomain` is sent as the `{ value }` object upstream dereferences.
+- **Tool descriptions for the verified writes now tell the calling model how to read the envelope** — report only a `confirmed` result as done, and relay the recheck instruction for anything else.
+- 30 new tests in `tests/cipp.service.verified-writes.test.ts`, covering all three outcomes for every verified write. The case that matters most has its own test on each: CIPP returns a clean HTTP 200 and the change is **not** there.
+
 ### Added
 - **Mailbox and online-archive size reporting** ([#91](https://github.com/WYRE-AI/cipp-mcp/issues/91), community request). Two new tools answer the storage questions the server previously could not: who is near quota, which mailboxes need archiving, and how much Exchange storage a tenant actually consumes.
   - **`cipp_list_mailbox_usage`** reports every mailbox in a tenant — primary size, item count, quota and percent-of-quota, plus the same figures for the online archive — sorted largest first (`mailboxSize`, `archiveSize`, `totalSize` or `percentOfQuota`), with an optional `minSizeGB` floor. Tenant-wide totals are computed across every mailbox before `limit` is applied, so the summary stays true even when only the top rows come back; the default limit of 50 keeps a large tenant from blowing the client's tool-result limit, the failure [#73](https://github.com/wyre-technology/cipp-mcp/issues/73) hit on `cipp_list_users`.
