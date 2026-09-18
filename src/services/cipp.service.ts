@@ -731,6 +731,27 @@ export class CippService {
    * Create a new user in a tenant.
    * Calls the `AddUser` Azure Function.
    *
+   * CIPP's `Invoke-AddUser` BUILDS the account's userPrincipalName by
+   * concatenating the body's `username` and `Domain` fields
+   * (`New-CippUser.ps1`):
+   *
+   * ```powershell
+   * $UserPrincipalName = "$($UserObj.username)@$($UserObj.Domain ?
+   *                        $UserObj.Domain : $UserObj.PrimDomain.value)"
+   * ```
+   *
+   * It never reads a `userPrincipalName` field — the same contract as
+   * `Invoke-EditUser` (see {@link resolveUserIdentity}). Forwarding a full
+   * UPN therefore yields either `@` (both halves absent) or a doubled
+   * `user@domain@domain`, and upstream 500s with "The domain portion of the
+   * userPrincipalName property is invalid. You must use one of the verified
+   * domain names in your organization." That message reads like a
+   * tenant/verified-domain problem, so it sends you auditing domains, DNS and
+   * GDAP instead of the request body.
+   *
+   * Split the UPN here so callers keep one natural `userPrincipalName`
+   * argument.
+   *
    * @param tenantFilter - Tenant domain or identifier.
    * @param userData     - User properties to set (displayName, UPN, password, etc.).
    */
@@ -738,7 +759,34 @@ export class CippService {
     tenantFilter: string,
     userData: Record<string, unknown>
   ): Promise<T> {
-    return this.request<T>('POST', 'AddUser', undefined, { tenantFilter, ...userData });
+    const { userPrincipalName, ...rest } = userData;
+
+    if (typeof userPrincipalName !== 'string' || !userPrincipalName.includes('@')) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `userPrincipalName must be a full UPN of the form user@domain (received ` +
+          `${JSON.stringify(userPrincipalName)}). CIPP builds the account's UPN from ` +
+          `separate username and Domain fields.`
+      );
+    }
+
+    const at = userPrincipalName.lastIndexOf('@');
+    const username = userPrincipalName.slice(0, at);
+    const domain = userPrincipalName.slice(at + 1);
+
+    if (!username || !domain) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `userPrincipalName "${userPrincipalName}" is missing a local part or a domain.`
+      );
+    }
+
+    return this.request<T>('POST', 'AddUser', undefined, {
+      tenantFilter,
+      username,
+      Domain: domain,
+      ...rest,
+    });
   }
 
   /**
