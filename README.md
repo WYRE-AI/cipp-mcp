@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/KelvinTegelaar
 
 ## Features
 
-- **48 tools** across 12 categories
+- **48 tools** across 13 categories
 - Tenant, user, group, and mailbox management
 - Mailbox and online-archive size reporting, per tenant or per user
 - Per-user Entra ID sign-in logs (status, location, Conditional Access, MFA)

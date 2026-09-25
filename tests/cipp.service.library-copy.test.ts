@@ -233,7 +233,7 @@ describe('CippService startLibraryCopy', () => {
     );
 
     await expect(svc.startLibraryCopy(copyInput())).rejects.toThrow(
-      /CIPP refused the library copy: Failed to run Action 'StartLibraryCopy'.*limit 1,000/
+      /CIPP refused the library copy \(HTTP 400\): Failed to run Action 'StartLibraryCopy'.*limit 1,000/
     );
   });
 
@@ -472,7 +472,7 @@ describe('CippService getLibraryCopyStatus', () => {
     );
 
     await expect(svc.getLibraryCopyStatus('contoso.com', 'op-missing')).rejects.toThrow(
-      /operation not found.*tenantFilter/
+      /library copy op-missing \(HTTP 400\):.*operation not found.*tenantFilter/
     );
   });
 

@@ -812,6 +812,16 @@ function resultsFromHttpError(err: unknown): unknown {
   }
 }
 
+/**
+ * The upstream HTTP status {@link CippService.request} recorded in its error
+ * message ("CIPP API returned HTTP <status> ..."), as " (HTTP <status>)" for
+ * appending to a rewritten message, or "" when there is none.
+ */
+function httpStatusSuffix(err: unknown): string {
+  const status = err instanceof Error ? /\bHTTP (\d{3})\b/.exec(err.message)?.[1] : undefined;
+  return status ? ` (HTTP ${status})` : '';
+}
+
 /** Case-insensitive property read, since PowerShell serialises with whatever casing it was built with. */
 function readProp(obj: unknown, key: string): unknown {
   if (!obj || typeof obj !== 'object') return undefined;
@@ -1573,8 +1583,8 @@ export class CippService {
       const { results, failures } = interpretResults(strings);
       throw new McpError(
         ErrorCode.InternalError,
-        `CIPP ListUserSigninLogs returned a message instead of sign-in records for ` +
-          `${identity.userPrincipalName}: ${(failures.length > 0 ? failures : results).join('; ')}`
+        `CIPP ListUserSigninLogs returned a message instead of sign-in records for user ` +
+          `${identity.id}: ${(failures.length > 0 ? failures : results).join('; ')}`
       );
     }
 
@@ -2509,7 +2519,10 @@ export class CippService {
     } catch (err) {
       const upstream = resultsFromHttpError(err);
       if (typeof upstream === 'string') {
-        throw new McpError(ErrorCode.InternalError, `CIPP refused the library copy: ${upstream}`);
+        throw new McpError(
+          ErrorCode.InternalError,
+          `CIPP refused the library copy${httpStatusSuffix(err)}: ${upstream}`
+        );
       }
       throw err;
     }
@@ -2644,7 +2657,8 @@ export class CippService {
       if (typeof upstream === 'string') {
         throw new McpError(
           ErrorCode.InternalError,
-          `CIPP could not report the status of library copy ${operationId}: ${upstream}` +
+          `CIPP could not report the status of library copy ${operationId}` +
+            `${httpStatusSuffix(err)}: ${upstream}` +
             (/not found/i.test(upstream)
               ? ' Operations are stored per tenant, so check tenantFilter matches the one the copy was started in.'
               : '')

@@ -390,8 +390,13 @@ describe('CippService listUserSigninLogs', () => {
       jsonResponse([`Failed to retrieve Sign In report for user ${OBJECT_ID} : Error: timeout`])
     );
 
-    await expect(svc.listUserSigninLogs('contoso.com', 'alice@contoso.com')).rejects.toThrow(
-      /returned a message instead of sign-in records[\s\S]*timeout/
+    const err = (await svc
+      .listUserSigninLogs('contoso.com', 'alice@contoso.com')
+      .catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(
+      new RegExp(`returned a message instead of sign-in records for user ${OBJECT_ID}[\\s\\S]*timeout`)
     );
+    // The object id identifies the user; the UPN (customer PII) stays out of errors.
+    expect(err.message).not.toMatch(/alice@contoso\.com/);
   });
 });
