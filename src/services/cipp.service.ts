@@ -459,6 +459,212 @@ function summariseMailboxUsage(rows: MailboxUsageRow[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Sign-in logs
+// ---------------------------------------------------------------------------
+
+/**
+ * `Invoke-ListUserSigninLogs` defaults `top` to 50 and interpolates it straight
+ * into Graph's `$top`. Graph caps `auditLogs/signIns` pages at 1000, and the
+ * handler fetches a single page (`-noPagination $true`), so 1000 is the most a
+ * single call can ever return.
+ */
+const SIGNIN_LOGS_DEFAULT_TOP = 50;
+const SIGNIN_LOGS_MAX_TOP = 1000;
+
+/**
+ * Graph's reply when the tenant lacks the Entra ID P1/P2 licence that sign-in
+ * log API access requires. Upstream wraps it in a generic "Failed to retrieve
+ * Sign In report" string, which reads like a CIPP fault rather than a licence
+ * gap.
+ */
+const SIGNIN_PREMIUM_REQUIRED_RE = /premium|RequestFromNonPremiumTenant/i;
+
+/** Applied Conditional Access policy outcomes that carry no information. */
+const CA_POLICY_NOISE = new Set(['notApplied', 'notEnabled', 'unknownFutureValue']);
+
+/** Risk values Graph uses to mean "nothing to report". */
+const RISK_NOISE = new Set(['none', 'hidden', 'unknownFutureValue']);
+
+/** One sign-in, flattened from a Graph `signIn` object to what a technician reads. */
+export interface SignInLogRow {
+  /** `createdDateTime`, ISO 8601 UTC. */
+  time?: string;
+  app?: string;
+  /** The resource the token was issued for, e.g. "Microsoft Graph". */
+  resource?: string;
+  ipAddress?: string;
+  /** "City, State, CC" — whichever parts Graph supplied. */
+  location?: string;
+  /** `success` when Graph's `status.errorCode` is 0, `failure` for any other code. */
+  status?: 'success' | 'failure';
+  errorCode?: number;
+  failureReason?: string;
+  additionalDetails?: string;
+  /** e.g. "Browser", "Mobile Apps and Desktop clients", "Exchange ActiveSync". */
+  clientApp?: string;
+  /** `success`, `failure` or `notApplied`. */
+  conditionalAccessStatus?: string;
+  /** Policies that actually evaluated (applied or failed); not-applied noise is dropped. */
+  conditionalAccessPolicies?: Array<{ name?: string; result?: string }>;
+  /** `singleFactorAuthentication` or `multiFactorAuthentication`. */
+  authenticationRequirement?: string;
+  /** Present only when Graph recorded authentication steps or MFA detail. */
+  mfa?: {
+    methods?: string[];
+    detail?: string;
+    steps?: Array<{ method?: string; succeeded?: boolean; detail?: string }>;
+  };
+  device?: {
+    name?: string;
+    operatingSystem?: string;
+    browser?: string;
+    isCompliant?: boolean;
+    isManaged?: boolean;
+    trustType?: string;
+  };
+  /** Present only when Graph flagged risk on the sign-in. */
+  risk?: { level?: string; state?: string; detail?: string };
+  isInteractive?: boolean;
+  userAgent?: string;
+  correlationId?: string;
+  id?: string;
+}
+
+/** What {@link CippService.listUserSigninLogs} returns. */
+export interface UserSigninLogListing {
+  tenantFilter: string;
+  userId: string;
+  userPrincipalName: string;
+  /** The `top` sent upstream — the most rows this call could have returned. */
+  requested: number;
+  returned: number;
+  summary: {
+    successful: number;
+    failed: number;
+    distinctIpAddresses: number;
+    countries: string[];
+    /** Newest and oldest sign-in in this page. */
+    newest?: string;
+    oldest?: string;
+  };
+  warnings?: string[];
+  signIns: SignInLogRow[];
+}
+
+/** Read a finite number field, else undefined. */
+function numberField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Read a boolean field, else undefined. */
+function booleanField(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+/** Drop keys whose value is `undefined`; return `undefined` if nothing is left. */
+function compact<T extends Record<string, unknown>>(obj: T): T | undefined {
+  const entries = Object.entries(obj).filter(([, v]) => v !== undefined);
+  return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
+}
+
+/** Treat a value as a plain object, or an empty one. */
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Flatten one Graph beta `signIn` object.
+ *
+ * Only fields Graph actually populated are emitted; an absent MFA or risk block
+ * means Graph recorded none, not that the check was skipped here.
+ */
+function normaliseSignIn(raw: Record<string, unknown>): SignInLogRow {
+  const status = asRecord(raw.status);
+  const location = asRecord(raw.location);
+  const device = asRecord(raw.deviceDetail);
+  const mfaDetail = asRecord(raw.mfaDetail);
+
+  const errorCode = numberField(status.errorCode);
+  const place = [location.city, location.state, location.countryOrRegion]
+    .filter(nonEmpty)
+    .join(', ');
+
+  const policies = (Array.isArray(raw.appliedConditionalAccessPolicies)
+    ? raw.appliedConditionalAccessPolicies
+    : []
+  )
+    .map(asRecord)
+    .filter((p) => !(typeof p.result === 'string' && CA_POLICY_NOISE.has(p.result)))
+    .map((p) => ({ name: stringField(p.displayName), result: stringField(p.result) }));
+
+  // authenticationDetails (beta) is the current record of each auth step;
+  // mfaDetail is the older single-method summary. Keep whichever exists.
+  const steps = (Array.isArray(raw.authenticationDetails) ? raw.authenticationDetails : [])
+    .map(asRecord)
+    .map((s) =>
+      compact({
+        method: stringField(s.authenticationMethod),
+        succeeded: booleanField(s.succeeded),
+        detail: stringField(s.authenticationStepResultDetail),
+      })
+    )
+    .filter((s): s is NonNullable<typeof s> => s !== undefined);
+  const methods = [
+    ...new Set(
+      [
+        ...steps.map((s) => s.method),
+        stringField(mfaDetail.authMethod),
+      ].filter(nonEmpty)
+    ),
+  ];
+  const mfa = compact({
+    methods: methods.length > 0 ? methods : undefined,
+    detail: stringField(mfaDetail.authDetail),
+    steps: steps.length > 0 ? steps : undefined,
+  });
+
+  const riskValue = (v: unknown) =>
+    nonEmpty(v) && !RISK_NOISE.has(v) ? v : undefined;
+  const risk = compact({
+    level: riskValue(raw.riskLevelDuringSignIn) ?? riskValue(raw.riskLevelAggregated),
+    state: riskValue(raw.riskState),
+    detail: riskValue(raw.riskDetail),
+  });
+
+  return {
+    time: stringField(raw.createdDateTime),
+    app: stringField(raw.appDisplayName),
+    resource: stringField(raw.resourceDisplayName),
+    ipAddress: stringField(raw.ipAddress),
+    location: place || undefined,
+    status: errorCode === undefined ? undefined : errorCode === 0 ? 'success' : 'failure',
+    errorCode,
+    failureReason: errorCode === 0 ? undefined : stringField(status.failureReason),
+    additionalDetails: stringField(status.additionalDetails),
+    clientApp: stringField(raw.clientAppUsed),
+    conditionalAccessStatus: stringField(raw.conditionalAccessStatus),
+    conditionalAccessPolicies: policies.length > 0 ? policies : undefined,
+    authenticationRequirement: stringField(raw.authenticationRequirement),
+    mfa,
+    device: compact({
+      name: stringField(device.displayName),
+      operatingSystem: stringField(device.operatingSystem),
+      browser: stringField(device.browser),
+      isCompliant: booleanField(device.isCompliant),
+      isManaged: booleanField(device.isManaged),
+      trustType: stringField(device.trustType),
+    }),
+    risk,
+    isInteractive: booleanField(raw.isInteractive),
+    userAgent: stringField(raw.userAgent),
+    correlationId: stringField(raw.correlationId),
+    id: stringField(raw.id),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -1077,6 +1283,136 @@ export class CippService {
    */
   async listUserGroups<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
     return this.request<T>('GET', 'ListUserGroups', { tenantFilter, userId });
+  }
+
+  /**
+   * List a user's most recent interactive sign-ins, newest first.
+   * Calls the `ListUserSigninLogs` Azure Function.
+   *
+   * `Invoke-ListUserSigninLogs` reads exactly three query parameters —
+   * `tenantFilter`, `UserID` and `top` — and interpolates `UserID` unescaped
+   * into Graph's `$filter=(userId eq '<UserID>')`. Graph's `userId` is the
+   * Entra *object id*: a UPN there matches nothing and comes back as an empty,
+   * successful page, indistinguishable from "this user has not signed in".
+   * So the user is always resolved first — a UPN to its object id, and an
+   * object id checked to exist — and only the resolved GUID is sent.
+   *
+   * Upstream fetches one page (`-noPagination $true`), with no all-tenants
+   * branch. On failure it returns HTTP 500 with the body
+   * `["Failed to retrieve Sign In report for user <id> : Error: <reason>"]`.
+   *
+   * @param tenantFilter - Tenant domain or GUID. `allTenants` is not supported.
+   * @param upnOrId      - UPN or Entra object id of the user.
+   * @param params.top   - Sign-ins to return, 1–1000. Defaults to 50, as upstream does.
+   */
+  async listUserSigninLogs(
+    tenantFilter: string,
+    upnOrId: string,
+    params: { top?: number } = {}
+  ): Promise<UserSigninLogListing> {
+    if (tenantFilter.trim().toLowerCase() === 'alltenants') {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "cipp_list_user_signin_logs reads one user's sign-ins in one tenant; allTenants is not " +
+          "supported (Invoke-ListUserSigninLogs has no all-tenants branch). Name the user's own " +
+          'tenant. For tenant-wide sign-ins, use the Sign-Ins report in CIPP ' +
+          '(ListSignIns / ListGraphRequest with Endpoint=auditLogs/signIns).'
+      );
+    }
+
+    const top = params.top ?? SIGNIN_LOGS_DEFAULT_TOP;
+    if (!Number.isInteger(top) || top < 1 || top > SIGNIN_LOGS_MAX_TOP) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `top must be an integer between 1 and ${SIGNIN_LOGS_MAX_TOP}; got ${params.top}.`
+      );
+    }
+
+    const identity = await this.resolveUserIdentity(
+      tenantFilter,
+      upnOrId,
+      'Sign-in logs are filtered by Entra object id, which could not be determined — ' +
+        'querying without it would return an empty page that reads as "no sign-ins".'
+    );
+
+    let raw: unknown;
+    try {
+      raw = await this.request<unknown>('GET', 'ListUserSigninLogs', {
+        tenantFilter,
+        UserID: identity.id,
+        top,
+      });
+    } catch (err) {
+      if (err instanceof McpError && SIGNIN_PREMIUM_REQUIRED_RE.test(err.message)) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Tenant ${tenantFilter} cannot serve sign-in logs through the API: Microsoft Graph ` +
+            'requires an Entra ID P1 or P2 licence in the tenant for auditLogs/signIns. ' +
+            `Upstream said: ${err.message}`
+        );
+      }
+      throw err;
+    }
+
+    // Success is a bare array of Graph signIn objects. An empty page comes back
+    // as `[]` or `[null]` (PowerShell's `@($null)`), so nulls are dropped
+    // rather than read as rows. A string in the array is upstream failure text
+    // under a 200 — never let that pass as "no sign-ins".
+    const entries = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
+    const strings = entries.filter((e) => typeof e === 'string');
+    if (strings.length > 0) {
+      const { results, failures } = interpretResults(strings);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `CIPP ListUserSigninLogs returned a message instead of sign-in records for ` +
+          `${identity.userPrincipalName}: ${(failures.length > 0 ? failures : results).join('; ')}`
+      );
+    }
+
+    const signIns = entries
+      .filter((e): e is Record<string, unknown> => typeof e === 'object' && e !== null)
+      .map(normaliseSignIn);
+
+    const countries = [
+      ...new Set(
+        entries
+          .map((e) => asRecord(asRecord(e).location).countryOrRegion)
+          .filter(nonEmpty)
+      ),
+    ].sort();
+    const times = signIns.map((s) => s.time).filter(nonEmpty).sort();
+
+    const warnings: string[] = [];
+    if (signIns.length === 0) {
+      warnings.push(
+        `No interactive sign-ins were returned for ${identity.userPrincipalName}. Entra retains ` +
+          'sign-in logs for 30 days, and this endpoint returns interactive sign-ins only — ' +
+          'non-interactive, service-principal and managed-identity sign-ins are not included.'
+      );
+    } else if (signIns.length >= top) {
+      warnings.push(
+        `Returned the ${top} most recent sign-ins, which is the limit requested; older ` +
+          `sign-ins exist. Raise top (maximum ${SIGNIN_LOGS_MAX_TOP}) to see further back.`
+      );
+    }
+
+    return {
+      tenantFilter,
+      userId: identity.id,
+      userPrincipalName: identity.userPrincipalName,
+      requested: top,
+      returned: signIns.length,
+      summary: {
+        successful: signIns.filter((s) => s.status === 'success').length,
+        failed: signIns.filter((s) => s.status === 'failure').length,
+        distinctIpAddresses: new Set(signIns.map((s) => s.ipAddress).filter(nonEmpty)).size,
+        countries,
+        newest: times[times.length - 1],
+        oldest: times[0],
+      },
+      ...(warnings.length > 0 && { warnings }),
+      signIns,
+    };
   }
 
   /**
