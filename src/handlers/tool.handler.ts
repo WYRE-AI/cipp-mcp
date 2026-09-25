@@ -3,7 +3,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { CippService, OutOfOfficeInput } from '../services/cipp.service.js';
+import { CippService, LibraryCopyInput, OutOfOfficeInput } from '../services/cipp.service.js';
 import { Logger } from '../utils/logger.js';
 import { TOOL_DEFINITIONS } from '../mcp/tool.definitions.js';
 
@@ -433,6 +433,25 @@ export class CippToolHandler {
 
         case 'cipp_list_gdap_invites': {
           result = await this.cippService.listGDAPInvites();
+          break;
+        }
+
+        // -----------------------------------------------------------------------
+        // SharePoint
+        // -----------------------------------------------------------------------
+        case 'cipp_start_library_copy': {
+          // Field names match LibraryCopyInput one-to-one; the service validates
+          // required ids, nameConflictBehavior and destFolderName at runtime.
+          result = await this.cippService.startLibraryCopy(args as unknown as LibraryCopyInput);
+          break;
+        }
+
+        case 'cipp_get_library_copy_status': {
+          const { tenantFilter, operationId } = args as {
+            tenantFilter: string;
+            operationId: string;
+          };
+          result = await this.cippService.getLibraryCopyStatus(tenantFilter, operationId);
           break;
         }
 
