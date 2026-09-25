@@ -4,10 +4,11 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/KelvinTegelaar
 
 ## Features
 
-- **46 tools** across 12 categories
+- **48 tools** across 12 categories
 - Tenant, user, group, and mailbox management
 - Mailbox and online-archive size reporting, per tenant or per user
 - Per-user Entra ID sign-in logs (status, location, Conditional Access, MFA)
+- SharePoint / OneDrive library copy with progress polling (e.g. archiving a leaver's OneDrive)
 - Security: Conditional Access policies, named locations
 - Standards & compliance: BPA, domain health, drift detection
 - License reporting (per-tenant and CSP-wide)
@@ -103,6 +104,7 @@ Add to your `claude_desktop_config.json`:
 | Licenses | list_licenses, list_csp_licenses |
 | Alerts | list_audit_logs, list_alert_queue |
 | GDAP | list_gdap_roles, list_gdap_invites |
+| SharePoint | start_library_copy, get_library_copy_status |
 | Scheduler | list_scheduled_items, add_scheduled_item |
 | Core | ping, get_version, list_logs |
 
@@ -156,11 +158,36 @@ summary of failures, distinct IPs and countries.
   otherwise; the tool names the licence gap instead of relaying a generic
   "Failed to retrieve Sign In report".
 
+### SharePoint library copy
+
+`start_library_copy` copies the contents of one document library into another in
+the same tenant — typically a departing user's OneDrive into a shared archive
+library. It wraps CIPP's `ExecSiteBrowserLibraryCopy`, which queues SharePoint
+copy jobs and returns at once, so the tool returns an `operationId` rather than
+a finished copy. Poll `get_library_copy_status` with that id until `done` is
+true; its `state` is one of `queued`, `running`, `succeeded`, `failed` or
+`partial`, and it lists the per-item errors SharePoint logged. `partial` means
+some content arrived and some did not — it is not a success.
+
+- Both libraries are addressed by Graph site id plus SharePoint list GUID. For a
+  OneDrive, Graph `GET /users/{upn}/drive?$select=sharePointIds` returns both.
+  A site URL alone is not enough: CIPP binds the site ids as mandatory.
+- The default conflict behaviour is `Replace`, which overwrites same-named items
+  at the destination. Pass `nameConflictBehavior: "Fail"` to keep them.
+- CIPP refuses libraries with more than 1,000 root items and system libraries.
+  `preflightOnly: true` validates and counts without copying.
+- CIPP marks an operation `Failed` as soon as any one copy job fails, and stops
+  tracking the rest from then on. Other jobs may still have copied content, so
+  check the destination after a `failed` result.
+- `destFolderName` copies into a folder at the destination library's root
+  (e.g. `Archive - jane@contoso.com`) instead of the root itself. See the
+  version note below.
+
 ### CIPP version compatibility
 
 Request bodies are shaped against CIPP's own `Invoke-*.ps1` handlers and are
 written to satisfy both current and older CIPP builds — where the two differ,
-the server sends the form both accept. Three behaviours are worth knowing:
+the server sends the form both accept. Four behaviours are worth knowing:
 
 - **`offboard_user` reports queued, not completed.** CIPP's `ExecOffboardUser`
   returns HTTP 200 the instant the job is created; it never waits for or reports
@@ -176,6 +203,14 @@ the server sends the form both accept. Three behaviours are worth knowing:
   `DisableOneDriveSharing` and `set_out_of_office`'s `timezone` are ignored by
   older builds rather than erroring — so an offboarding that selects *only*
   `DisableOneDriveSharing` will run no actions on an older CIPP.
+- **`start_library_copy`'s `destFolderName` needs a CIPP patch not yet merged
+  upstream.** Builds without it ignore the field and copy into the destination
+  library *root*. The tool validates the name client-side with the same rules
+  as the patch (trimmed; none of `" * : < > ? / \ |` or control characters;
+  not only dots or whitespace; at most 255 characters; no leading `~$` or
+  `_vti_`; not a reserved name such as `Forms`, `CON` or `LPT1`) and warns in
+  its result, on preflight and on start, whenever CIPP does not echo the
+  folder back.
 
 ## Authentication Setup
 

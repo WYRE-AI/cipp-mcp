@@ -1104,6 +1104,150 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
   },
 
   // -------------------------------------------------------------------------
+  // SharePoint tools
+  // -------------------------------------------------------------------------
+  {
+    name: 'cipp_start_library_copy',
+    description:
+      '⚠ HIGH-IMPACT. Starts an asynchronous copy of one SharePoint / OneDrive document ' +
+      "library's contents into another library in the same tenant (the source is left " +
+      "intact). Typical use: archive a departing user's OneDrive into a shared library, " +
+      'e.g. into a folder named "Archive - jane@contoso.com". Returns an operationId ' +
+      'immediately — nothing has been copied at that point. Poll ' +
+      'cipp_get_library_copy_status with the operationId until done is true, and never ' +
+      'report the copy as complete before it says succeeded. With the default ' +
+      'nameConflictBehavior (Replace) same-named items at the destination are overwritten. ' +
+      'CIPP refuses libraries with more than 1,000 root items and system libraries ' +
+      '(Site Assets, Site Pages, Style Library, Form Templates, Preservation Hold Library). ' +
+      'Use preflightOnly to validate and count first. ' +
+      'NOTE: destFolderName needs a CIPP build carrying the DestFolderName patch, which is ' +
+      'not yet merged upstream. Older CIPP versions silently ignore it and copy into the ' +
+      'destination library ROOT; the result warns when CIPP does not confirm the folder. ' +
+      'Confirm with the user before invoking.',
+    annotations: {
+      title: 'Start library copy (high-impact)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            "Tenant domain name or ID that owns both libraries. 'allTenants' is not supported.",
+        },
+        sourceSiteId: {
+          type: 'string',
+          description:
+            'Microsoft Graph site id of the source site (e.g. "contoso-my.sharepoint.com,<site-guid>,<web-guid>"). ' +
+            "For a user's OneDrive, Graph GET /users/{upn}/drive?$select=sharePointIds returns it. " +
+            'Required: CIPP does not accept a site URL alone.',
+        },
+        sourceListId: {
+          type: 'string',
+          description:
+            "SharePoint list GUID of the source document library (for a OneDrive, the drive's " +
+            'sharePointIds.listId).',
+        },
+        destSiteId: {
+          type: 'string',
+          description: 'Microsoft Graph site id of the destination site.',
+        },
+        destListId: {
+          type: 'string',
+          description: 'SharePoint list GUID of the destination document library.',
+        },
+        sourceSiteUrl: {
+          type: 'string',
+          description: 'Optional absolute URL of the source site. CIPP resolves it from the site id when omitted.',
+        },
+        destSiteUrl: {
+          type: 'string',
+          description: 'Optional absolute URL of the destination site.',
+        },
+        sourceSiteName: {
+          type: 'string',
+          description: 'Optional display label for the source site, shown in status reports.',
+        },
+        sourceLibraryName: {
+          type: 'string',
+          description: 'Optional display label for the source library.',
+        },
+        destSiteName: {
+          type: 'string',
+          description: 'Optional display label for the destination site.',
+        },
+        destLibraryName: {
+          type: 'string',
+          description: 'Optional display label for the destination library.',
+        },
+        nameConflictBehavior: {
+          type: 'string',
+          enum: ['Fail', 'Replace'],
+          description:
+            'What SharePoint does when an item of the same name already exists at the ' +
+            'destination. Defaults to Replace (overwrite) upstream; Fail skips it and reports an error.',
+        },
+        destFolderName: {
+          type: 'string',
+          description:
+            'Optional folder at the root of the destination library to copy INTO (created if ' +
+            'missing, reused if present), e.g. "Archive - jane@contoso.com". Omit to copy into ' +
+            'the library root. Must not contain " * : < > ? / \\ | or control characters, must not be ' +
+            'only dots or whitespace, must be at most 255 characters, must not start with "~$" or ' +
+            'contain "_vti_", and must not be a reserved name (Forms, desktop.ini, .lock, CON, PRN, ' +
+            'AUX, NUL, COM0-9, LPT0-9); surrounding whitespace is trimmed. Requires the unmerged CIPP ' +
+            'DestFolderName patch — older CIPP ignores it and copies to the library root.',
+        },
+        preflightOnly: {
+          type: 'boolean',
+          description:
+            'When true, CIPP validates both libraries and counts the root items that would be ' +
+            'copied, without starting anything. Defaults to false.',
+        },
+      },
+      required: ['tenantFilter', 'sourceSiteId', 'sourceListId', 'destSiteId', 'destListId'],
+    },
+  },
+  {
+    name: 'cipp_get_library_copy_status',
+    description:
+      'Report the progress of a library copy started by cipp_start_library_copy. Returns a ' +
+      'normalised state — queued, running, succeeded, failed or partial — plus done ' +
+      '(true once the state is final), jobs and objects completed, files created, bytes ' +
+      'copied, and the per-item errors and warnings SharePoint logged (de-duplicated, with ' +
+      'file names and URLs redacted by CIPP). partial means some content was copied and some ' +
+      'was not; report its errors rather than calling it a success. Poll every minute or so ' +
+      'while done is false.',
+    annotations: {
+      title: 'Get library copy status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            'Tenant the copy was started in. Operations are stored per tenant, so a different ' +
+            'tenant reports the operation as not found.',
+        },
+        operationId: {
+          type: 'string',
+          description: 'The operationId returned by cipp_start_library_copy.',
+        },
+      },
+      required: ['tenantFilter', 'operationId'],
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // Scheduler tools
   // -------------------------------------------------------------------------
   {
@@ -1240,6 +1384,7 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
   licenses: ['cipp_list_licenses', 'cipp_list_csp_licenses'],
   alerts: ['cipp_list_audit_logs', 'cipp_list_alert_queue'],
   gdap: ['cipp_list_gdap_roles', 'cipp_list_gdap_invites'],
+  sharepoint: ['cipp_start_library_copy', 'cipp_get_library_copy_status'],
   scheduler: ['cipp_list_scheduled_items', 'cipp_add_scheduled_item'],
   core: ['cipp_ping', 'cipp_get_version', 'cipp_list_logs'],
 };

@@ -665,6 +665,209 @@ function normaliseSignIn(raw: Record<string, unknown>): SignInLogRow {
 }
 
 // ---------------------------------------------------------------------------
+// SharePoint library copy
+// ---------------------------------------------------------------------------
+
+/** `NameConflictBehavior` values `Invoke-ExecSiteBrowserLibraryCopy` maps by name. */
+const LIBRARY_COPY_CONFLICT_BEHAVIORS = ['Fail', 'Replace'] as const;
+export type LibraryCopyConflictBehavior = (typeof LIBRARY_COPY_CONFLICT_BEHAVIORS)[number];
+
+/** Arguments accepted by {@link CippService.startLibraryCopy}. */
+export interface LibraryCopyInput {
+  tenantFilter: string;
+  /** Graph site id of the source site. Required in practice — see {@link CippService.startLibraryCopy}. */
+  sourceSiteId: string;
+  /** SharePoint list GUID of the source document library. */
+  sourceListId: string;
+  destSiteId: string;
+  destListId: string;
+  sourceSiteUrl?: string;
+  destSiteUrl?: string;
+  /** Display labels stored on the operation row; CIPP falls back to the site / library titles. */
+  sourceSiteName?: string;
+  sourceLibraryName?: string;
+  destSiteName?: string;
+  destLibraryName?: string;
+  /** Upstream default is `Replace`, which overwrites same-named items at the destination. */
+  nameConflictBehavior?: LibraryCopyConflictBehavior;
+  /**
+   * Copy into a folder of this name at the destination library's root instead
+   * of the root itself. Requires a CIPP build carrying the `DestFolderName`
+   * patch; older builds ignore it and copy to the library root.
+   */
+  destFolderName?: string;
+  /** Run `PreflightLibraryCopy` (count and validate only) instead of starting the copy. */
+  preflightOnly?: boolean;
+}
+
+/** Normalised library-copy states reported by {@link CippService.getLibraryCopyStatus}. */
+export type LibraryCopyState = 'queued' | 'running' | 'succeeded' | 'failed' | 'partial' | 'unknown';
+
+/**
+ * Characters SharePoint refuses in a file or folder name. Mirrors the
+ * validation the `DestFolderName` CIPP patch applies server-side, so a bad
+ * name fails here rather than after a round trip.
+ */
+const SHAREPOINT_ILLEGAL_NAME_CHARS_RE = /["*:<>?/\\|]/;
+
+/**
+ * Names SharePoint refuses for a file or folder, compared case-insensitively.
+ * Must stay identical to the list in the patch's
+ * `Test-CIPPSharePointLibraryCopyFolderName`.
+ */
+const SHAREPOINT_RESERVED_NAMES = new Set(
+  [
+    'Forms',
+    '.lock',
+    'desktop.ini',
+    'CON',
+    'PRN',
+    'AUX',
+    'NUL',
+    ...Array.from({ length: 10 }, (_, i) => `COM${i}`),
+    ...Array.from({ length: 10 }, (_, i) => `LPT${i}`),
+  ].map((n) => n.toLowerCase())
+);
+
+/**
+ * Validate and normalise a destination folder name.
+ *
+ * Returns the trimmed name. A supplied-but-blank value is rejected rather than
+ * dropped: dropping it would silently copy into the library root, the exact
+ * outcome a caller naming a folder was trying to avoid.
+ */
+export function validateLibraryFolderName(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new McpError(ErrorCode.InvalidParams, 'destFolderName must be a string.');
+  }
+  const name = value.trim();
+  if (name === '') {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      'destFolderName is empty. Omit it to copy into the library root, or supply a folder name.'
+    );
+  }
+  if (/^[.\s]+$/.test(name)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${value}" consists only of dots and whitespace, which SharePoint does not allow.`
+    );
+  }
+  if (name.length > 255) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName is ${name.length} characters long; SharePoint allows at most 255.`
+    );
+  }
+  const illegal = name.match(SHAREPOINT_ILLEGAL_NAME_CHARS_RE);
+  if (illegal) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${value}" contains "${illegal[0]}". SharePoint folder names cannot contain ` +
+        'any of " * : < > ? / \\ | — and path separators are refused because the folder is created ' +
+        'directly at the library root, not as a nested path.'
+    );
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F]/.test(name)) {
+    throw new McpError(ErrorCode.InvalidParams, 'destFolderName cannot contain control characters.');
+  }
+  if (name.startsWith('~$') || /_vti_/i.test(name)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${value}" cannot start with "~$" or contain "_vti_"; SharePoint reserves both.`
+    );
+  }
+  if (SHAREPOINT_RESERVED_NAMES.has(name.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${name}" is a name SharePoint reserves and cannot be used for a folder.`
+    );
+  }
+  return name;
+}
+
+/**
+ * Pull the `Results` payload out of a CIPP HTTP-error McpError.
+ *
+ * Both library-copy entrypoints report every failure as HTTP 400 with the
+ * sentence in `Results`, which {@link CippService.request} folds into its
+ * error message after the URL. Returns undefined when no JSON body is found.
+ */
+function resultsFromHttpError(err: unknown): unknown {
+  if (!(err instanceof McpError)) return undefined;
+  const brace = err.message.indexOf('{');
+  if (brace < 0) return undefined;
+  try {
+    const parsed = JSON.parse(err.message.slice(brace)) as { Results?: unknown };
+    return parsed?.Results;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Case-insensitive property read, since PowerShell serialises with whatever casing it was built with. */
+function readProp(obj: unknown, key: string): unknown {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const record = obj as Record<string, unknown>;
+  if (key in record) return record[key];
+  const lower = key.toLowerCase();
+  const match = Object.keys(record).find((k) => k.toLowerCase() === lower);
+  return match !== undefined ? record[match] : undefined;
+}
+
+/**
+ * Flatten `Update-CIPPSharePointLibraryCopyStatus`' `Errors` / `Warnings`
+ * (arrays of `{ Severity, Message }`, de-duplicated upstream) into strings.
+ */
+function issueMessages(raw: unknown): string[] {
+  const entries = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
+  return entries
+    .map((e) => {
+      if (typeof e === 'string') return e;
+      const message = readProp(e, 'Message');
+      return typeof message === 'string' ? message : JSON.stringify(e);
+    })
+    .filter((m) => m.trim() !== '');
+}
+
+/**
+ * Map CIPP's operation status onto the normalised vocabulary.
+ *
+ * Upstream (`Update-CIPPSharePointLibraryCopyStatus`) emits `Processing`,
+ * `Completed`, `CompletedWithErrors` and `Failed`; a freshly chunked row may
+ * also carry `Queued`. Two refinements:
+ *
+ * - `CompletedWithErrors` covers both "some items failed" and "every job
+ *   failed". It reads as `partial` only when something was actually copied.
+ * - `Completed` with a non-zero error count is downgraded to `partial` — the
+ *   error count wins over the label, never the other way round.
+ */
+function normaliseLibraryCopyState(
+  upstream: string | undefined,
+  figures: { jobsComplete?: number; objectsProcessed?: number; filesCreated?: number; totalErrors?: number; errorCount: number }
+): LibraryCopyState {
+  const hasErrors = (figures.totalErrors ?? 0) > 0 || figures.errorCount > 0;
+  const copiedSomething = (figures.filesCreated ?? 0) > 0 || (figures.objectsProcessed ?? 0) > 0;
+  switch ((upstream ?? '').toLowerCase()) {
+    case 'queued':
+      return 'queued';
+    case 'processing':
+      return (figures.jobsComplete ?? 0) === 0 && (figures.objectsProcessed ?? 0) === 0
+        ? 'queued'
+        : 'running';
+    case 'completed':
+      return hasErrors ? 'partial' : 'succeeded';
+    case 'completedwitherrors':
+      return copiedSomething ? 'partial' : 'failed';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'unknown';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -2190,6 +2393,340 @@ export class CippService {
         failures.length > 0
           ? `CIPP returned HTTP 200 but reported a failure adding scheduled task "${itemData.taskName}". Do NOT report success to the caller: ${failures.join(' | ')}`
           : `Scheduled task "${itemData.taskName}" added.`,
+    } as T;
+  }
+
+  // -------------------------------------------------------------------------
+  // SharePoint library copy
+  // -------------------------------------------------------------------------
+
+  /**
+   * Start (or preflight) a SharePoint document-library content copy.
+   * Calls the `ExecSiteBrowserLibraryCopy` Azure Function with
+   * `Action: StartLibraryCopy` (or `PreflightLibraryCopy`).
+   *
+   * Upstream contracts this mirrors, from `Invoke-ExecSiteBrowserLibraryCopy`
+   * and `Start-CIPPSharePointLibraryCopy`:
+   *
+   * - Site ids are required even though the entrypoint's own check accepts a
+   *   URL instead: it passes `[string]$null` (an empty string) into
+   *   `Start-CIPPSharePointLibraryCopy`, whose `SourceSiteId` / `DestSiteId`
+   *   are `Mandatory` `[string]`, so a URL-only call dies in parameter binding.
+   * - `NameConflictBehavior` defaults to `Replace` upstream; `Fail` and
+   *   `Replace` are mapped by name.
+   * - The copy is asynchronous (SharePoint `CreateCopyJobs` with
+   *   MoveButKeepSource). Success here means jobs were *queued*, never that
+   *   content arrived — the returned `OperationId` must be polled with
+   *   {@link getLibraryCopyStatus}.
+   * - Every failure is HTTP 400 with the reason as a string in `Results`.
+   *
+   * `DestFolderName` is the one field not yet in upstream CIPP: builds without
+   * the patch ignore it silently and copy into the library root. The start
+   * result does not reliably say which happened, so when the field is sent
+   * and not echoed back, the result carries a warning.
+   */
+  async startLibraryCopy<T = unknown>(input: LibraryCopyInput): Promise<T> {
+    const { tenantFilter } = input;
+    if (!nonEmpty(tenantFilter)) {
+      throw new McpError(ErrorCode.InvalidParams, 'tenantFilter is required.');
+    }
+    if (tenantFilter.trim().toLowerCase() === 'alltenants') {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'A library copy runs inside one tenant; allTenants is not supported. Pass the tenant that owns both libraries.'
+      );
+    }
+    const required = {
+      sourceSiteId: input.sourceSiteId,
+      sourceListId: input.sourceListId,
+      destSiteId: input.destSiteId,
+      destListId: input.destListId,
+    };
+    for (const [field, value] of Object.entries(required)) {
+      if (!nonEmpty(value)) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `${field} is required. CIPP binds site ids as mandatory parameters, so a site URL alone is not enough.`
+        );
+      }
+    }
+    if (
+      input.sourceSiteId.trim() === input.destSiteId.trim() &&
+      input.sourceListId.trim().toLowerCase() === input.destListId.trim().toLowerCase()
+    ) {
+      throw new McpError(ErrorCode.InvalidParams, 'Source and destination library must be different.');
+    }
+    if (
+      input.nameConflictBehavior !== undefined &&
+      !(LIBRARY_COPY_CONFLICT_BEHAVIORS as readonly string[]).includes(input.nameConflictBehavior)
+    ) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `nameConflictBehavior must be one of ${LIBRARY_COPY_CONFLICT_BEHAVIORS.join(', ')}; got "${String(input.nameConflictBehavior)}".`
+      );
+    }
+    const destFolderName =
+      input.destFolderName !== undefined ? validateLibraryFolderName(input.destFolderName) : undefined;
+
+    const action = input.preflightOnly === true ? 'PreflightLibraryCopy' : 'StartLibraryCopy';
+    const body: Record<string, unknown> = {
+      tenantFilter,
+      Action: action,
+      SourceSiteId: input.sourceSiteId.trim(),
+      SourceListId: input.sourceListId.trim(),
+      DestSiteId: input.destSiteId.trim(),
+      DestListId: input.destListId.trim(),
+    };
+    const optional: Array<[string, string | undefined]> = [
+      ['SourceSiteUrl', input.sourceSiteUrl],
+      ['DestSiteUrl', input.destSiteUrl],
+      ['SourceSiteName', input.sourceSiteName],
+      ['SourceLibraryName', input.sourceLibraryName],
+      ['DestSiteName', input.destSiteName],
+      ['DestLibraryName', input.destLibraryName],
+      ['NameConflictBehavior', input.nameConflictBehavior],
+    ];
+    for (const [key, value] of optional) {
+      if (nonEmpty(value)) body[key] = value;
+    }
+    // Only when supplied: an absent field is the unpatched-CIPP behaviour, exactly.
+    if (destFolderName !== undefined) body.DestFolderName = destFolderName;
+
+    let response: { Results?: unknown } | undefined;
+    try {
+      response = await this.request<{ Results?: unknown }>(
+        'POST',
+        'ExecSiteBrowserLibraryCopy',
+        undefined,
+        body
+      );
+    } catch (err) {
+      const upstream = resultsFromHttpError(err);
+      if (typeof upstream === 'string') {
+        throw new McpError(ErrorCode.InternalError, `CIPP refused the library copy: ${upstream}`);
+      }
+      throw err;
+    }
+
+    const results = response?.Results;
+    if (results === undefined || results === null || typeof results === 'string' || Array.isArray(results)) {
+      // The entrypoint returns an object on success. Anything else is a
+      // failure sentence, or a shape we do not understand — neither is a copy.
+      const { results: lines } = interpretResults(results);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `CIPP returned HTTP 200 without a library copy result. Do NOT report that a copy started: ${
+          lines.join(' | ') || '(empty response)'
+        }`
+      );
+    }
+
+    const message = stringField(readProp(results, 'Message'));
+
+    if (action === 'PreflightLibraryCopy') {
+      const eligibleRootCount = toFiniteNumber(readProp(results, 'EligibleRootCount'));
+      const warnLevel = stringField(readProp(results, 'WarnLevel'));
+      const preflightWarnings: string[] = [];
+      let destFolderExists: boolean | undefined;
+      if (destFolderName !== undefined) {
+        // A patched CIPP echoes DestFolderName and reports DestFolderExists on
+        // preflight; an unpatched one returns neither.
+        const echoed = stringField(readProp(results, 'DestFolderName'));
+        const exists = readProp(results, 'DestFolderExists');
+        destFolderExists = typeof exists === 'boolean' ? exists : undefined;
+        if (echoed === undefined) {
+          preflightWarnings.push(
+            `CIPP did not confirm DestFolderName "${destFolderName}". This CIPP build probably lacks the ` +
+              'DestFolderName patch, in which case a real start would copy into the destination library ROOT.'
+          );
+        }
+      }
+      return {
+        status: 'preflight',
+        tenantFilter,
+        eligibleRootCount,
+        warnLevel,
+        ...(destFolderName !== undefined && { destFolderName }),
+        ...(destFolderExists !== undefined && { destFolderExists }),
+        ...(preflightWarnings.length > 0 && { warnings: preflightWarnings }),
+        upstreamMessage: message,
+        message:
+          `Preflight passed: ${eligibleRootCount ?? 'an unknown number of'} root item(s) would be copied, ` +
+          'one SharePoint copy job each. Nothing was copied. Call again without preflightOnly to start.' +
+          (warnLevel && warnLevel !== 'none'
+            ? ` CIPP flags this as a large copy (warnLevel "${warnLevel}").`
+            : ''),
+      } as T;
+    }
+
+    const operationId = stringField(readProp(results, 'OperationId'));
+    if (!operationId) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `CIPP returned HTTP 200 but no OperationId, so there is nothing to track. Do NOT report that a copy started. Response: ${JSON.stringify(results)}`
+      );
+    }
+
+    const warnings: string[] = [];
+    if (destFolderName !== undefined) {
+      const echoed = stringField(readProp(results, 'DestFolderName'));
+      if (echoed === undefined) {
+        warnings.push(
+          `CIPP did not confirm DestFolderName "${destFolderName}". CIPP builds without the ` +
+            'DestFolderName patch ignore it silently and copy into the destination library root ' +
+            'instead of the folder. Check the destination library before relying on the folder.'
+        );
+      } else if (echoed !== destFolderName) {
+        warnings.push(
+          `CIPP reports copying into folder "${echoed}", not the requested "${destFolderName}".`
+        );
+      }
+    }
+
+    const jobHandleCount = toFiniteNumber(readProp(results, 'JobHandleCount'));
+    const createdRaw = destFolderName !== undefined ? readProp(results, 'DestFolderCreated') : undefined;
+    const destFolderCreated = typeof createdRaw === 'boolean' ? createdRaw : undefined;
+    return {
+      status: 'started',
+      tenantFilter,
+      operationId,
+      jobHandleCount,
+      ...(destFolderName !== undefined && { destFolderName }),
+      ...(destFolderCreated !== undefined && { destFolderCreated }),
+      ...(warnings.length > 0 && { warnings }),
+      upstreamMessage: message,
+      nextStep:
+        `Poll cipp_get_library_copy_status with tenantFilter "${tenantFilter}" and operationId ` +
+        `"${operationId}" until done is true.`,
+      message:
+        `Library copy queued as ${jobHandleCount ?? 'an unknown number of'} SharePoint copy job(s). ` +
+        'Nothing has been copied yet: this confirms the jobs were created, not that they finished. ' +
+        'Do not report the copy as complete until cipp_get_library_copy_status says succeeded.',
+    } as T;
+  }
+
+  /**
+   * Report the progress of a library copy started by {@link startLibraryCopy}.
+   * Calls the `ListSiteBrowserLibraryCopy` Azure Function (query:
+   * `tenantFilter`, `OperationId`).
+   *
+   * Upstream (`Update-CIPPSharePointLibraryCopyStatus`) polls every unfinished
+   * job on each call and returns a sanitised aggregate. Once the status is
+   * `Completed`, `CompletedWithErrors` or `Failed` it stops polling and
+   * serves the stored snapshot — including `Failed`, which it sets as soon as
+   * any job fails even while others are still running in SharePoint.
+   * Per-item errors come back de-duplicated and with file names and URLs
+   * redacted upstream, so they identify *what* went wrong rather than *which*
+   * file.
+   */
+  async getLibraryCopyStatus<T = unknown>(tenantFilter: string, operationId: string): Promise<T> {
+    if (!nonEmpty(tenantFilter)) {
+      throw new McpError(ErrorCode.InvalidParams, 'tenantFilter is required.');
+    }
+    if (!nonEmpty(operationId)) {
+      throw new McpError(ErrorCode.InvalidParams, 'operationId is required.');
+    }
+
+    let response: { Results?: unknown } | undefined;
+    try {
+      response = await this.request<{ Results?: unknown }>('GET', 'ListSiteBrowserLibraryCopy', {
+        tenantFilter,
+        OperationId: operationId.trim(),
+      });
+    } catch (err) {
+      const upstream = resultsFromHttpError(err);
+      if (typeof upstream === 'string') {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `CIPP could not report the status of library copy ${operationId}: ${upstream}` +
+            (/not found/i.test(upstream)
+              ? ' Operations are stored per tenant, so check tenantFilter matches the one the copy was started in.'
+              : '')
+        );
+      }
+      throw err;
+    }
+
+    const snapshot = response?.Results;
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      const { results: lines } = interpretResults(snapshot);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `CIPP returned HTTP 200 without a library copy status. Do NOT assume the copy succeeded: ${
+          lines.join(' | ') || '(empty response)'
+        }`
+      );
+    }
+
+    const num = (key: string) => toFiniteNumber(readProp(snapshot, key));
+    const upstreamStatus = stringField(readProp(snapshot, 'Status'));
+    const errors = issueMessages(readProp(snapshot, 'Errors'));
+    const warnings = issueMessages(readProp(snapshot, 'Warnings'));
+    const figures = {
+      jobsComplete: num('JobsComplete'),
+      jobsTotal: num('JobsTotal'),
+      objectsProcessed: num('ObjectsProcessed'),
+      totalExpectedObjects: num('TotalExpectedObjects'),
+      progressPercent: num('ProgressPercent'),
+      filesCreated: num('FilesCreated'),
+      bytesProcessed: num('BytesProcessed'),
+      totalErrors: num('TotalErrors'),
+      totalWarnings: num('TotalWarnings'),
+    };
+    const state = normaliseLibraryCopyState(upstreamStatus, { ...figures, errorCount: errors.length });
+    const done = state === 'succeeded' || state === 'failed' || state === 'partial';
+
+    const errorCount = figures.totalErrors ?? errors.length;
+    let message: string;
+    switch (state) {
+      case 'queued':
+        message = 'Copy jobs are queued in SharePoint and have not started. Poll again later.';
+        break;
+      case 'running':
+        message = `Copy in progress (${figures.jobsComplete ?? '?'} of ${figures.jobsTotal ?? '?'} jobs complete). Poll again later.`;
+        break;
+      case 'succeeded':
+        message = 'Library copy completed with no errors reported.';
+        break;
+      case 'partial':
+        message =
+          `Library copy finished with ${errorCount} error(s): some content was copied and some was not. ` +
+          'Do NOT report this as a clean success — list the errors to the caller.';
+        break;
+      case 'failed':
+        message =
+          'Library copy failed. Do NOT report success.' +
+          (upstreamStatus?.toLowerCase() === 'failed'
+            ? ' CIPP marks an operation Failed as soon as any copy job fails and stops tracking the rest, so other jobs may still have copied content — check the destination library.'
+            : ' No content was reported as copied.');
+        break;
+      default:
+        message = `CIPP reported an unrecognised status "${upstreamStatus ?? '(none)'}". Do NOT assume the copy succeeded.`;
+    }
+
+    const destFolderName = stringField(readProp(snapshot, 'DestFolderName'));
+    return {
+      tenantFilter,
+      operationId: stringField(readProp(snapshot, 'OperationId')) ?? operationId,
+      state,
+      done,
+      upstreamStatus,
+      ...figures,
+      bytesCopied: formatBytes(figures.bytesProcessed),
+      errors,
+      warnings,
+      source: {
+        siteName: stringField(readProp(snapshot, 'SourceSiteName')),
+        libraryName: stringField(readProp(snapshot, 'SourceLibraryName')),
+      },
+      destination: {
+        siteName: stringField(readProp(snapshot, 'DestSiteName')),
+        libraryName: stringField(readProp(snapshot, 'DestLibraryName')),
+        ...(destFolderName !== undefined && { folderName: destFolderName }),
+      },
+      lastUpdatedUtc: stringField(readProp(snapshot, 'LastUpdatedUtc')),
+      upstreamMessage: stringField(readProp(snapshot, 'Message')),
+      message,
     } as T;
   }
 
