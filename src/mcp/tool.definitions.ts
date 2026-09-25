@@ -1151,8 +1151,10 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           description:
             'Optional folder at the root of the destination library to copy INTO (created if ' +
             'missing, reused if present), e.g. "Archive - jane@contoso.com". Omit to copy into ' +
-            'the library root. Must not contain " * : < > ? / \\ | and must not be only dots or ' +
-            'whitespace; surrounding whitespace is trimmed. Requires the unmerged CIPP ' +
+            'the library root. Must not contain " * : < > ? / \\ | or control characters, must not be ' +
+            'only dots or whitespace, must be at most 255 characters, must not start with "~$" or ' +
+            'contain "_vti_", and must not be a reserved name (Forms, desktop.ini, .lock, CON, PRN, ' +
+            'AUX, NUL, COM0-9, LPT0-9); surrounding whitespace is trimmed. Requires the unmerged CIPP ' +
             'DestFolderName patch — older CIPP ignores it and copies to the library root.',
         },
         preflightOnly: {

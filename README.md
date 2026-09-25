@@ -184,9 +184,12 @@ the server sends the form both accept. Four behaviours are worth knowing:
   `DisableOneDriveSharing` will run no actions on an older CIPP.
 - **`start_library_copy`'s `destFolderName` needs a CIPP patch not yet merged
   upstream.** Builds without it ignore the field and copy into the destination
-  library *root*. The tool validates the name client-side (none of
-  `" * : < > ? / \ |`, not only dots or whitespace, trimmed) and warns in its
-  result whenever CIPP does not echo the folder back.
+  library *root*. The tool validates the name client-side with the same rules
+  as the patch (trimmed; none of `" * : < > ? / \ |` or control characters;
+  not only dots or whitespace; at most 255 characters; no leading `~$` or
+  `_vti_`; not a reserved name such as `Forms`, `CON` or `LPT1`) and warns in
+  its result, on preflight and on start, whenever CIPP does not echo the
+  folder back.
 
 ## Authentication Setup
 

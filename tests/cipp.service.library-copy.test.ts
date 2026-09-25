@@ -177,6 +177,14 @@ describe('CippService startLibraryCopy', () => {
     ['only dots and spaces', ' . . '],
     ['only whitespace', '   '],
     ['the empty string', ''],
+    ['a control character', 'Archive\njane'],
+    ['a leading ~$', '~$archive'],
+    ['_vti_', 'my_VTI_folder'],
+    ['the reserved name Forms', 'forms'],
+    ['the reserved name CON', 'CON'],
+    ['the reserved name LPT1', 'lpt1'],
+    ['the reserved name desktop.ini', 'Desktop.ini'],
+    ['256 characters', 'a'.repeat(256)],
   ])('rejects a folder name containing %s without calling CIPP', async (_label, name) => {
     const fetchMock = mockFetch(jsonResponse(STARTED));
 
@@ -246,6 +254,64 @@ describe('validateLibraryFolderName', () => {
   it('trims and accepts ordinary names, including an address', () => {
     expect(validateLibraryFolderName('  Archive - jane@contoso.com ')).toBe('Archive - jane@contoso.com');
     expect(validateLibraryFolderName('Leavers 2026.09')).toBe('Leavers 2026.09');
+    expect(validateLibraryFolderName('a'.repeat(255))).toHaveLength(255);
+    expect(validateLibraryFolderName('Forms archive')).toBe('Forms archive');
+    expect(validateLibraryFolderName('CON 2026')).toBe('CON 2026');
+  });
+});
+
+describe('startLibraryCopy with a patched CIPP', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('reports whether the folder was created on start', async () => {
+    mockFetch(
+      jsonResponse({
+        Results: { ...STARTED.Results, DestFolderName: 'Archive - jane', DestFolderCreated: true },
+      })
+    );
+
+    const result = (await service().startLibraryCopy(copyInput({ destFolderName: 'Archive - jane' }))) as any;
+
+    expect(result.destFolderCreated).toBe(true);
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('reports DestFolderExists on preflight and does not warn when the folder is echoed', async () => {
+    mockFetch(
+      jsonResponse({
+        Results: {
+          EligibleRootCount: 3,
+          WarnLevel: 'none',
+          Message: 'Estimated SharePoint jobs: 3.',
+          DestFolderName: 'Archive - jane',
+          DestFolderExists: false,
+        },
+      })
+    );
+
+    const result = (await service().startLibraryCopy(
+      copyInput({ destFolderName: 'Archive - jane', preflightOnly: true })
+    )) as any;
+
+    expect(result.destFolderExists).toBe(false);
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('warns on preflight when an unpatched CIPP ignores DestFolderName', async () => {
+    mockFetch(
+      jsonResponse({
+        Results: { EligibleRootCount: 3, WarnLevel: 'none', Message: 'Estimated SharePoint jobs: 3.' },
+      })
+    );
+
+    const result = (await service().startLibraryCopy(
+      copyInput({ destFolderName: 'Archive - jane', preflightOnly: true })
+    )) as any;
+
+    expect(result).not.toHaveProperty('destFolderExists');
+    expect(result.warnings[0]).toMatch(/library ROOT/);
   });
 });
 

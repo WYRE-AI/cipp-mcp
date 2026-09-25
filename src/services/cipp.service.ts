@@ -505,6 +505,25 @@ export type LibraryCopyState = 'queued' | 'running' | 'succeeded' | 'failed' | '
 const SHAREPOINT_ILLEGAL_NAME_CHARS_RE = /["*:<>?/\\|]/;
 
 /**
+ * Names SharePoint refuses for a file or folder, compared case-insensitively.
+ * Must stay identical to the list in the patch's
+ * `Test-CIPPSharePointLibraryCopyFolderName`.
+ */
+const SHAREPOINT_RESERVED_NAMES = new Set(
+  [
+    'Forms',
+    '.lock',
+    'desktop.ini',
+    'CON',
+    'PRN',
+    'AUX',
+    'NUL',
+    ...Array.from({ length: 10 }, (_, i) => `COM${i}`),
+    ...Array.from({ length: 10 }, (_, i) => `LPT${i}`),
+  ].map((n) => n.toLowerCase())
+);
+
+/**
  * Validate and normalise a destination folder name.
  *
  * Returns the trimmed name. A supplied-but-blank value is rejected rather than
@@ -528,6 +547,12 @@ export function validateLibraryFolderName(value: unknown): string {
       `destFolderName "${value}" consists only of dots and whitespace, which SharePoint does not allow.`
     );
   }
+  if (name.length > 255) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName is ${name.length} characters long; SharePoint allows at most 255.`
+    );
+  }
   const illegal = name.match(SHAREPOINT_ILLEGAL_NAME_CHARS_RE);
   if (illegal) {
     throw new McpError(
@@ -535,6 +560,22 @@ export function validateLibraryFolderName(value: unknown): string {
       `destFolderName "${value}" contains "${illegal[0]}". SharePoint folder names cannot contain ` +
         'any of " * : < > ? / \\ | — and path separators are refused because the folder is created ' +
         'directly at the library root, not as a nested path.'
+    );
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F]/.test(name)) {
+    throw new McpError(ErrorCode.InvalidParams, 'destFolderName cannot contain control characters.');
+  }
+  if (name.startsWith('~$') || /_vti_/i.test(name)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${value}" cannot start with "~$" or contain "_vti_"; SharePoint reserves both.`
+    );
+  }
+  if (SHAREPOINT_RESERVED_NAMES.has(name.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `destFolderName "${name}" is a name SharePoint reserves and cannot be used for a folder.`
     );
   }
   return name;
@@ -2149,12 +2190,29 @@ export class CippService {
     if (action === 'PreflightLibraryCopy') {
       const eligibleRootCount = toFiniteNumber(readProp(results, 'EligibleRootCount'));
       const warnLevel = stringField(readProp(results, 'WarnLevel'));
+      const preflightWarnings: string[] = [];
+      let destFolderExists: boolean | undefined;
+      if (destFolderName !== undefined) {
+        // A patched CIPP echoes DestFolderName and reports DestFolderExists on
+        // preflight; an unpatched one returns neither.
+        const echoed = stringField(readProp(results, 'DestFolderName'));
+        const exists = readProp(results, 'DestFolderExists');
+        destFolderExists = typeof exists === 'boolean' ? exists : undefined;
+        if (echoed === undefined) {
+          preflightWarnings.push(
+            `CIPP did not confirm DestFolderName "${destFolderName}". This CIPP build probably lacks the ` +
+              'DestFolderName patch, in which case a real start would copy into the destination library ROOT.'
+          );
+        }
+      }
       return {
         status: 'preflight',
         tenantFilter,
         eligibleRootCount,
         warnLevel,
         ...(destFolderName !== undefined && { destFolderName }),
+        ...(destFolderExists !== undefined && { destFolderExists }),
+        ...(preflightWarnings.length > 0 && { warnings: preflightWarnings }),
         upstreamMessage: message,
         message:
           `Preflight passed: ${eligibleRootCount ?? 'an unknown number of'} root item(s) would be copied, ` +
@@ -2190,12 +2248,15 @@ export class CippService {
     }
 
     const jobHandleCount = toFiniteNumber(readProp(results, 'JobHandleCount'));
+    const createdRaw = destFolderName !== undefined ? readProp(results, 'DestFolderCreated') : undefined;
+    const destFolderCreated = typeof createdRaw === 'boolean' ? createdRaw : undefined;
     return {
       status: 'started',
       tenantFilter,
       operationId,
       jobHandleCount,
       ...(destFolderName !== undefined && { destFolderName }),
+      ...(destFolderCreated !== undefined && { destFolderCreated }),
       ...(warnings.length > 0 && { warnings }),
       upstreamMessage: message,
       nextStep:
