@@ -475,9 +475,11 @@ const SIGNIN_LOGS_MAX_TOP = 1000;
  * Graph's reply when the tenant lacks the Entra ID P1/P2 licence that sign-in
  * log API access requires. Upstream wraps it in a generic "Failed to retrieve
  * Sign In report" string, which reads like a CIPP fault rather than a licence
- * gap.
+ * gap. Matched narrowly: the error message embeds the request URL, so a bare
+ * /premium/ would fire for any tenant whose domain contains the word.
  */
-const SIGNIN_PREMIUM_REQUIRED_RE = /premium|RequestFromNonPremiumTenant/i;
+const SIGNIN_PREMIUM_REQUIRED_RE =
+  /RequestFromNonPremiumTenant|(?:doesn't|does not|don't|do not) have (?:a |an )?premium licen[cs]e|premium licen[cs]e is required/i;
 
 /** Applied Conditional Access policy outcomes that carry no information. */
 const CA_POLICY_NOISE = new Set(['notApplied', 'notEnabled', 'unknownFutureValue']);
@@ -508,8 +510,12 @@ export interface SignInLogRow {
   conditionalAccessPolicies?: Array<{ name?: string; result?: string }>;
   /** `singleFactorAuthentication` or `multiFactorAuthentication`. */
   authenticationRequirement?: string;
-  /** Present only when Graph recorded authentication steps or MFA detail. */
-  mfa?: {
+  /**
+   * Authentication steps Graph recorded, first factor included — a password-only
+   * sign-in shows methods ["Password"]. Whether MFA was required is
+   * `authenticationRequirement`, not the presence of this block.
+   */
+  authentication?: {
     methods?: string[];
     detail?: string;
     steps?: Array<{ method?: string; succeeded?: boolean; detail?: string }>;
@@ -619,7 +625,7 @@ function normaliseSignIn(raw: Record<string, unknown>): SignInLogRow {
       ].filter(nonEmpty)
     ),
   ];
-  const mfa = compact({
+  const authentication = compact({
     methods: methods.length > 0 ? methods : undefined,
     detail: stringField(mfaDetail.authDetail),
     steps: steps.length > 0 ? steps : undefined,
@@ -647,7 +653,7 @@ function normaliseSignIn(raw: Record<string, unknown>): SignInLogRow {
     conditionalAccessStatus: stringField(raw.conditionalAccessStatus),
     conditionalAccessPolicies: policies.length > 0 ? policies : undefined,
     authenticationRequirement: stringField(raw.authenticationRequirement),
-    mfa,
+    authentication,
     device: compact({
       name: stringField(device.displayName),
       operatingSystem: stringField(device.operatingSystem),
@@ -1595,7 +1601,7 @@ export class CippService {
     } else if (signIns.length >= top) {
       warnings.push(
         `Returned the ${top} most recent sign-ins, which is the limit requested; older ` +
-          `sign-ins exist. Raise top (maximum ${SIGNIN_LOGS_MAX_TOP}) to see further back.`
+          `sign-ins may exist. Raise top (maximum ${SIGNIN_LOGS_MAX_TOP}) to see further back.`
       );
     }
 

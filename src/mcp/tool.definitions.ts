@@ -496,8 +496,8 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       "List one user's most recent interactive Entra ID sign-ins, newest first. Each row " +
       'gives the time, app and resource, IP address, location, success/failure with the ' +
       'error code and failure reason, client app, Conditional Access status and the ' +
-      'policies that evaluated, authentication requirement and MFA methods/steps where ' +
-      'Graph recorded them, device, and risk when flagged — plus a summary of failures, ' +
+      'policies that evaluated, authentication requirement (whether MFA was required) and ' +
+      'the authentication methods/steps Graph recorded, first factor included, device, and risk when flagged — plus a summary of failures, ' +
       'distinct IPs and countries. Answers "why can\'t this user sign in", "was this ' +
       'account used from somewhere unexpected", and "did MFA/CA apply". Accepts a UPN or ' +
       'Entra object id; a UPN is resolved to the object id first, because the upstream ' +
@@ -524,7 +524,7 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
           maximum: 1000,
           description:
             'Number of most recent sign-ins to return (default 50, maximum 1000). A result ' +
-            'that fills the limit carries a warning that older sign-ins exist.',
+            'that fills the limit carries a warning that older sign-ins may exist.',
         },
       },
       required: ['tenantFilter', 'userId'],

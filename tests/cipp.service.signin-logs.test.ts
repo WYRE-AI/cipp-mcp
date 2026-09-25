@@ -180,7 +180,7 @@ describe('CippService listUserSigninLogs', () => {
       conditionalAccessStatus: 'success',
       conditionalAccessPolicies: [{ name: 'Require MFA', result: 'success' }],
       authenticationRequirement: 'multiFactorAuthentication',
-      mfa: {
+      authentication: {
         methods: ['Password', 'Mobile app notification'],
         steps: [
           { method: 'Password', succeeded: true, detail: 'Correct password' },
@@ -232,7 +232,7 @@ describe('CippService listUserSigninLogs', () => {
     expect(row.failureReason).toBe('Invalid username or password.');
     expect(row.location).toBe('RU');
     expect(row.conditionalAccessPolicies).toBeUndefined();
-    expect(row.mfa).toBeUndefined();
+    expect(row.authentication).toBeUndefined();
     expect(row.risk).toEqual({ level: 'high', state: 'atRisk' });
   });
 
@@ -248,7 +248,7 @@ describe('CippService listUserSigninLogs', () => {
 
     const result = await svc.listUserSigninLogs('contoso.com', 'alice@contoso.com');
 
-    expect(result.signIns[0].mfa).toEqual({
+    expect(result.signIns[0].authentication).toEqual({
       methods: ['PhoneAppNotification'],
       detail: '+X XXXXXXXX12',
     });
@@ -282,12 +282,12 @@ describe('CippService listUserSigninLogs', () => {
     expect(result.warnings).toBeUndefined();
   });
 
-  it('warns that older sign-ins exist when the page fills top', async () => {
+  it('warns that older sign-ins may exist when the page fills top', async () => {
     mockCipp(() => jsonResponse([signIn(), signIn()]));
 
     const result = await svc.listUserSigninLogs('contoso.com', 'alice@contoso.com', { top: 2 });
 
-    expect(result.warnings).toEqual([expect.stringMatching(/older sign-ins exist/)]);
+    expect(result.warnings).toEqual([expect.stringMatching(/older sign-ins may exist/)]);
   });
 
   // -------------------------------------------------------------------------
@@ -346,6 +346,41 @@ describe('CippService listUserSigninLogs', () => {
     await expect(svc.listUserSigninLogs('contoso.com', 'alice@contoso.com')).rejects.toThrow(
       /Entra ID P1 or P2/
     );
+  });
+
+  it('names the licence gap from the bare Graph error code', async () => {
+    mockCipp(() =>
+      errorResponse(
+        500,
+        JSON.stringify([
+          `Failed to retrieve Sign In report for user ${OBJECT_ID} : Error: Authentication_RequestFromNonPremiumTenantOrB2CTenant`,
+        ])
+      )
+    );
+
+    await expect(svc.listUserSigninLogs('contoso.com', 'alice@contoso.com')).rejects.toThrow(
+      /Entra ID P1 or P2/
+    );
+  });
+
+  // The error message embeds the request URL, tenantFilter included, so a
+  // tenant domain containing "premium" must not turn every 500 into a licence gap.
+  it('does not blame licensing for an unrelated 500 from a tenant named premium-something', async () => {
+    mockCipp(() =>
+      errorResponse(
+        500,
+        JSON.stringify([
+          `Failed to retrieve Sign In report for user ${OBJECT_ID} : Error: Insufficient privileges to complete the operation.`,
+        ])
+      )
+    );
+
+    const err = await svc
+      .listUserSigninLogs('premiumfoods.com', 'alice@contoso.com')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as Error).message).toMatch(/Insufficient privileges/);
+    expect((err as Error).message).not.toMatch(/P1 or P2/);
   });
 
   // Never let "CIPP returned 200" mean success: a string where records belong

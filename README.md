@@ -151,7 +151,7 @@ summary of failures, distinct IPs and countries.
   and returns an empty page that reads as "this user never signs in". An
   unresolvable user is an error, not an empty result.
 - **One tenant, one user, one page.** `top` defaults to 50 and caps at 1000; a
-  full page carries a warning that older sign-ins exist. `allTenants` is
+  full page carries a warning that older sign-ins may exist. `allTenants` is
   rejected — the endpoint has no all-tenants branch. Tenant-wide sign-ins are
   CIPP's Sign-Ins report (`ListSignIns`), which this server does not expose.
 - **Needs Entra ID P1/P2 in the tenant.** Graph refuses sign-in log API access
