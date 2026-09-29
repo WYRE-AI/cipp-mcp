@@ -1,6 +1,6 @@
 # CIPP MCP Server
 
-MCP (Model Context Protocol) server for [CIPP](https://github.com/KelvinTegelaar/CIPP) — the CyberDrain Improved Partner Portal. Provides AI assistants with structured access to CIPP's M365 multi-tenant management capabilities.
+MCP (Model Context Protocol) server for [CIPP](https://github.com/CyberDrain/CIPP) — the CyberDrain Improved Partner Portal. Provides AI assistants with structured access to CIPP's M365 multi-tenant management capabilities.
 
 ## Features
 

@@ -13,9 +13,13 @@ CIPP reported success anyway.
 Two habits follow from that, and both are worth keeping:
 
 - **Read the PowerShell before changing a payload.** HTTP triggers live under
-  `Modules/CIPPHTTP/Public/Entrypoints/HTTP Functions/` in `KelvinTegelaar/CIPP-API`
-  (they moved there from `CIPPCore`). Routing is generic — `/api/Foo` dispatches
-  to `Invoke-Foo.ps1`.
+  `backend/Modules/CIPPHTTP/Public/Entrypoints/HTTP Functions/` in the
+  `CyberDrain/CIPP` monorepo, branch `dev` (they moved there from `CIPPCore`).
+  Routing is generic — `/api/Foo` dispatches to `Invoke-Foo.ps1`.
+- **Upstream PRs go to `CyberDrain/CIPP`, base `dev`, with paths under
+  `backend/`.** The old `KelvinTegelaar/CIPP-API` and `KelvinTegelaar/CIPP`
+  repos still exist but no longer accept PRs; a maintainer closes them with a
+  pointer to the monorepo (CIPP-API#2166, re-opened as CyberDrain/CIPP#773).
 - **Never let "CIPP returned 200" mean success.** Several entrypoints hardcode
   200 and report failures as strings in `Results`. `interpretResults` exists for
   exactly this.
