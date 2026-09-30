@@ -1,7 +1,7 @@
 {
   "name": "cipp-mcp",
   "version": "0.1.0",
-  "description": "MCP server for CIPP (CyberDrain Improved Partner Portal) — M365 multi-tenant management, users, security, and standards for MSPs",
+  "description": "MCP server for CIPP (CyberDrain Improved Partner Portal) \u2014 M365 multi-tenant management, users, security, and standards for MSPs",
   "main": "dist/entry.js",
   "bin": {
     "cipp-mcp": "./dist/entry.js"
@@ -18,7 +18,9 @@
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepare": "npm run build",
     "prebuild": "npm run clean",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "pack:mcpb": "node scripts/pack-mcpb.js",
+    "validate:mcpb": "mcpb validate manifest.json"
   },
   "keywords": [
     "mcp",
