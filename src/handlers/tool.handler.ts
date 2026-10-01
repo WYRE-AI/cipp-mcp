@@ -205,6 +205,16 @@ export class CippToolHandler {
           break;
         }
 
+        case 'cipp_list_user_signin_logs': {
+          const { tenantFilter, userId, top } = args as {
+            tenantFilter: string;
+            userId: string;
+            top?: number;
+          };
+          result = await this.cippService.listUserSigninLogs(tenantFilter, userId, { top });
+          break;
+        }
+
         // -----------------------------------------------------------------------
         // Groups
         // -----------------------------------------------------------------------
