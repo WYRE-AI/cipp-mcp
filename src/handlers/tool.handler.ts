@@ -264,6 +264,12 @@ export class CippToolHandler {
           break;
         }
 
+        case 'cipp_list_trusted_blocked_senders': {
+          const { tenantFilter, upn } = args as { tenantFilter: string; upn: string };
+          result = await this.cippService.listTrustedBlockedSenders(tenantFilter, upn);
+          break;
+        }
+
         case 'cipp_list_mailbox_usage': {
           const { tenantFilter, sortBy, limit, minSizeGB } = args as {
             tenantFilter: string;
