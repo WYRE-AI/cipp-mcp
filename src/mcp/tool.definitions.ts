@@ -636,6 +636,22 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     },
   },
   {
+    name: 'cipp_list_trusted_blocked_senders',
+    description:
+      "List a mailbox's safe-sender (trusted) and blocked-sender entries from its Exchange Online junk email settings. Read-only; returns an empty list when the mailbox has none configured, which is normal, not an error.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: TENANT_FILTER_PROP,
+        upn: {
+          type: 'string',
+          description: 'User Principal Name of the mailbox whose safe/blocked sender lists should be read.',
+        },
+      },
+      required: ['tenantFilter', 'upn'],
+    },
+  },
+  {
     name: 'cipp_list_mailbox_usage',
     description:
       'Report mailbox and online-archive sizes across a tenant, largest first, with ' +

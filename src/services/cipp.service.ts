@@ -1509,6 +1509,30 @@ export class CippService {
   }
 
   /**
+   * List the trusted-sender and blocked-sender entries configured on a
+   * mailbox's junk email settings (Exchange Online's safe/blocked senders
+   * and domains list).
+   * Calls the `ListUserTrustedBlockedSenders` Azure Function, which wraps
+   * `Get-MailboxJunkEmailConfiguration -Identity <upn>`. `UserId` is used as
+   * both the EXO request anchor and the `-Identity` value (a UPN is valid
+   * for both, same as every other EXO-identity call in this service);
+   * `userPrincipalName` is only echoed back into each returned row's label
+   * and does not affect which mailbox is queried, so both query params
+   * carry the same UPN. An empty response (`[]`) means the mailbox genuinely
+   * has no trusted or blocked entries configured, not an error.
+   *
+   * @param tenantFilter - Tenant domain or identifier.
+   * @param upn          - User principal name of the mailbox to read.
+   */
+  async listTrustedBlockedSenders<T = unknown>(tenantFilter: string, upn: string): Promise<T> {
+    return this.request<T>('GET', 'ListUserTrustedBlockedSenders', {
+      tenantFilter,
+      UserId: upn,
+      userPrincipalName: upn,
+    });
+  }
+
+  /**
    * Report primary-mailbox and online-archive sizes for one mailbox.
    * Calls the `ListUserMailboxDetails` Azure Function.
    *
