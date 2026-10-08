@@ -483,13 +483,31 @@ describe('createUser verification', () => {
 
     expect(result.status).toBe('pending');
     expect(result.message).toMatch(/do not report this to the caller as done/i);
-    expect(result.recheck).toMatch(/before telling anyone the account exists/i);
+    expect(result.recheck).toMatch(/before telling anyone whether the account exists/i);
   });
 
-  it('reports failed when CIPP reports the create failed inside its HTTP 200', async () => {
+  // AddUser's failure strings are frequently about a SECONDARY step
+  // (licence/group/mailbox grant) that runs after the account already
+  // exists -- readbackDespiteFailures means the account's actual presence,
+  // not the failure string alone, decides confirmed vs failed.
+  it('confirms (with failures populated) when the account exists despite a reported failure', async () => {
+    mockCreate({
+      write: { Results: ['Failed to apply licence: no seats available'] },
+      found: true,
+    });
+
+    const result = await settle(
+      svc.createUser('contoso.com', { displayName: 'Alice', userPrincipalName: UPN })
+    );
+
+    expect(result.status).toBe('confirmed');
+    expect(result.failures).toHaveLength(1);
+  });
+
+  it('reports failed when CIPP reports the create failed AND the account never appears', async () => {
     mockCreate({
       write: { Results: ['Failed to create user: a user with this UPN already exists'] },
-      found: true,
+      found: false,
     });
 
     const result = await settle(
@@ -498,6 +516,7 @@ describe('createUser verification', () => {
 
     expect(result.status).toBe('failed');
     expect(result.failures).toHaveLength(1);
+    expect(result.message).toMatch(/reported this write failed/i);
   });
 
   // New-CippUser builds the UPN from separate halves and never reads a whole

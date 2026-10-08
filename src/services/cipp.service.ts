@@ -980,9 +980,22 @@ export class CippService {
     recheck: string;
     timeoutMs?: number;
     intervalMs?: number;
+    /**
+     * Some writes (createUser) report failure strings for SECONDARY steps
+     * (licence assignment, group adds) that run after the core write already
+     * succeeded -- treating any failure string as a terminal 'failed' would
+     * skip the readback and could tell a caller the write never happened when
+     * it did. When set, a failure no longer short-circuits: readback still
+     * runs, 'confirmed' wins if the entity is actually visible (with the
+     * failures populated so the secondary-step gaps stay visible), and only
+     * an entity that's genuinely still absent after the verification window
+     * resolves to 'failed'. Every other caller's behavior is unchanged.
+     */
+    readbackDespiteFailures?: boolean;
   }): Promise<VerifiedWrite> {
     const submission = await opts.run();
     const { results, failures } = interpretResults(submission?.Results);
+    const hasFailures = failures.length > 0;
 
     const envelope = (status: WriteStatus): VerifiedWrite => ({
       status,
@@ -990,13 +1003,15 @@ export class CippService {
       message:
         status === 'confirmed'
           ? opts.confirmed
-          : `${opts.recheck} Do NOT report this to the caller as done.`,
+          : status === 'failed'
+            ? `CIPP reported this write failed: ${failures.join('; ')}. Do NOT report this to the caller as done.`
+            : `${opts.recheck} Do NOT report this to the caller as done.`,
       recheck: status === 'confirmed' ? null : opts.recheck,
       failures,
       submission,
     });
 
-    if (failures.length > 0) {
+    if (hasFailures && !opts.readbackDespiteFailures) {
       return envelope('failed');
     }
 
@@ -1018,7 +1033,12 @@ export class CippService {
         // A failed READ is not a failed WRITE. Stay unconfirmed and keep polling.
       }
       if (confirmed) return envelope('confirmed');
-      if (Date.now() >= deadline) return envelope('pending');
+      if (Date.now() >= deadline) {
+        // hasFailures means CIPP itself already reported a problem AND the
+        // entity never became visible -- a stronger signal than a bare
+        // timeout, so this resolves to 'failed' rather than 'pending'.
+        return envelope(hasFailures ? 'failed' : 'pending');
+      }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
@@ -1193,7 +1213,13 @@ export class CippService {
         );
       },
       confirmed: `User ${upn} confirmed present in ${tenantFilter}. Note that CIPP applies licences, group adds and mailbox grants after creation and reports their failures as strings in submission.Results — check those before calling the account fully provisioned.`,
-      recheck: `CIPP accepted AddUser for ${upn}, but the account was not visible in ${tenantFilter} within the verification window. Re-check with cipp_list_users before telling anyone the account exists.`,
+      recheck: `CIPP has not confirmed AddUser for ${upn} in ${tenantFilter} yet. Re-check with cipp_list_users before telling anyone whether the account exists.`,
+      // AddUser's failure strings are frequently about licences/groups/mailbox
+      // grants applied AFTER the account already exists, not about the
+      // account itself -- treating any such string as a hard 'failed' would
+      // skip the one check (is the account actually there) that tells the
+      // two cases apart.
+      readbackDespiteFailures: true,
     });
   }
 
