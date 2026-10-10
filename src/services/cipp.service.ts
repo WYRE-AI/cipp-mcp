@@ -803,27 +803,29 @@ export class CippService {
     const bearer = this.apiKey ?? (await this.tokenProvider!.getAccessToken());
     let response = await send(bearer);
 
-    // One shot, and only for 401. The token was minted for api://<clientId>,
-    // which is what current CIPP App Service auth allows. A deployment that
-    // still only accepts the legacy bare-GUID audience rejects that token
-    // with HTTP 401; retry the same request once with `<clientId>/.default`.
-    // Any other status is returned as-is. This is not a loop: the retry is a
-    // single extra send, and legacyFallbackScope() is undefined once that
-    // scope is already the one in use.
+    // One shot, and only for 401. The two automatic audiences are
+    // api://<clientId>/.default and the legacy <clientId>/.default. A 401
+    // clears any pin and retries the same request once with the other one,
+    // then re-pins whichever succeeds. Any other status is returned as-is.
+    // This is not a loop: alternateScope() is read once, and the retry is a
+    // single extra send even if that also returns 401.
     const fallbackScope =
-      !response.ok && response.status === 401 ? this.tokenProvider?.legacyFallbackScope() : undefined;
-    let usedLegacyFallback = false;
+      !response.ok && response.status === 401 ? this.tokenProvider?.alternateScope() : undefined;
+    let retriedAlternate = false;
     if (fallbackScope) {
-      usedLegacyFallback = true;
+      retriedAlternate = true;
       // Release the rejected response body before opening the retry.
       await response.text().catch(() => undefined);
-      this.logger.warn('CIPP rejected the access token with HTTP 401; retrying once with the legacy scope', {
+      // Drop the pin before the retry so a rejected audience cannot outlive
+      // this call. The alternate was already chosen from the scope that failed.
+      this.tokenProvider!.clearPinnedScope();
+      this.logger.warn('CIPP rejected the access token with HTTP 401; retrying once with the other scope', {
         method,
         url: url.toString(),
         scope: fallbackScope,
       });
-      const legacyBearer = await this.tokenProvider!.getAccessTokenForScope(fallbackScope);
-      response = await send(legacyBearer);
+      const alternateBearer = await this.tokenProvider!.getAccessTokenForScope(fallbackScope);
+      response = await send(alternateBearer);
       if (response.ok) {
         this.tokenProvider!.pinSuccessfulScope(fallbackScope);
       }
@@ -845,8 +847,8 @@ export class CippService {
         body: responseBody,
       });
       const fallbackNote =
-        usedLegacyFallback && response.status === 401
-          ? ` Retried once with legacy scope ${fallbackScope}; that token was also rejected.`
+        retriedAlternate && response.status === 401
+          ? ` Retried once with scope ${fallbackScope}; that token was also rejected.`
           : '';
       throw new McpError(
         ErrorCode.InternalError,

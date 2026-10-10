@@ -185,8 +185,7 @@ describe('OAuth token scope', () => {
 
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).message).toMatch(/HTTP 401/);
-    expect((error as McpError).message).toMatch(/Retried once with legacy scope/);
-    expect((error as McpError).message).toContain(LEGACY_SCOPE);
+    expect((error as McpError).message).toContain(`scope ${LEGACY_SCOPE}`);
 
     expect(callsTo(fetchMock, '/oauth2/v2.0/token').map((call) => tokenScope(call[1]))).toEqual([
       API_SCOPE,
@@ -243,16 +242,107 @@ describe('OAuth token scope', () => {
     expect(callsTo(fetchMock, '/api/ListTenants')).toHaveLength(1);
   });
 
-  it('does not retry the legacy scope again once that scope is already active', async () => {
-    const fetchMock = installFetch([401, 200, 401]);
+  it('flips a pinned legacy scope back to api:// after a 401', async () => {
+    const fetchMock = installFetch([401, 200, 401, 200]);
+    const svc = createService();
+    await svc.listTenants();
+
+    const beforeFlip = fetchMock.mock.calls.length;
+    await expect(svc.listTenants()).resolves.toEqual([{ customerId: 'contoso' }]);
+    const flip = fetchMock.mock.calls.slice(beforeFlip);
+    const flipApi = flip.filter(([url]) => String(url).includes('/api/ListTenants'));
+    const flipTokens = flip.filter(([url]) => String(url).includes('/oauth2/v2.0/token'));
+    expect(flipApi).toHaveLength(2);
+    expect(authorization(flipApi[0][1])).toBe('Bearer legacy-token');
+    expect(authorization(flipApi[1][1])).toBe(`Bearer api-token:${API_SCOPE}`);
+    expect(flipTokens).toHaveLength(1);
+    expect(tokenScope(flipTokens[0][1])).toBe(API_SCOPE);
+
+    const beforeLater = fetchMock.mock.calls.length;
+    await expect(svc.listTenants()).resolves.toEqual([{ customerId: 'contoso' }]);
+    const later = fetchMock.mock.calls.slice(beforeLater);
+    expect(later).toHaveLength(1);
+    expect(authorization(later[0][1])).toBe(`Bearer api-token:${API_SCOPE}`);
+
+    const fresh = createService();
+    const beforeFresh = fetchMock.mock.calls.length;
+    await fresh.listTenants();
+    const freshTokens = fetchMock.mock.calls
+      .slice(beforeFresh)
+      .filter(([url]) => String(url).includes('/oauth2/v2.0/token'));
+    expect(tokenScope(freshTokens[0][1])).toBe(API_SCOPE);
+  });
+
+  it('flips a pinned api:// scope to the legacy scope after a 401', async () => {
+    const fetchMock = installFetch([200, 401, 200]);
+    const svc = createService();
+    await svc.listTenants();
+
+    const beforeFlip = fetchMock.mock.calls.length;
+    await expect(svc.listTenants()).resolves.toEqual([{ customerId: 'contoso' }]);
+    const flip = fetchMock.mock.calls.slice(beforeFlip);
+    const flipApi = flip.filter(([url]) => String(url).includes('/api/ListTenants'));
+    const flipTokens = flip.filter(([url]) => String(url).includes('/oauth2/v2.0/token'));
+    expect(flipApi).toHaveLength(2);
+    expect(authorization(flipApi[0][1])).toBe(`Bearer api-token:${API_SCOPE}`);
+    expect(authorization(flipApi[1][1])).toBe('Bearer legacy-token');
+    expect(flipTokens).toHaveLength(1);
+    expect(tokenScope(flipTokens[0][1])).toBe(LEGACY_SCOPE);
+
+    const fresh = createService();
+    const beforeFresh = fetchMock.mock.calls.length;
+    await fresh.listTenants();
+    const freshCalls = fetchMock.mock.calls.slice(beforeFresh);
+    expect(freshCalls.filter(([url]) => String(url).includes('/api/ListTenants'))).toHaveLength(1);
+    expect(tokenScope(freshCalls.find(([url]) => String(url).includes('/oauth2/v2.0/token'))?.[1])).toBe(
+      LEGACY_SCOPE
+    );
+    expect(authorization(freshCalls.find(([url]) => String(url).includes('/api/ListTenants'))?.[1])).toBe(
+      'Bearer legacy-token'
+    );
+  });
+
+  it('does not try a third audience when the alternate scope is also rejected', async () => {
+    const fetchMock = installFetch([401, 200, 401, 401]);
     const svc = createService();
     await svc.listTenants();
 
     const before = fetchMock.mock.calls.length;
-    await expect(svc.listTenants()).rejects.toBeInstanceOf(McpError);
+    const error = await svc.listTenants().then(
+      () => {
+        throw new Error('expected the 401 to reject');
+      },
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).message).toMatch(/HTTP 401/);
+    expect((error as McpError).message).toContain(API_SCOPE);
+
     const later = fetchMock.mock.calls.slice(before);
-    expect(later.filter(([url]) => String(url).includes('/api/ListTenants'))).toHaveLength(1);
-    expect(later.filter(([url]) => String(url).includes('/oauth2/v2.0/token'))).toHaveLength(0);
+    const api = later.filter(([url]) => String(url).includes('/api/ListTenants'));
+    const tokens = later.filter(([url]) => String(url).includes('/oauth2/v2.0/token'));
+    expect(api).toHaveLength(2);
+    expect(authorization(api[0][1])).toBe('Bearer legacy-token');
+    expect(authorization(api[1][1])).toBe(`Bearer api-token:${API_SCOPE}`);
+    expect(tokens).toHaveLength(1);
+    expect(tokenScope(tokens[0][1])).toBe(API_SCOPE);
+
+    // The same ceiling holds when the pin started on api://.
+    TokenProvider.clearPinnedScopes();
+    const apiPinned = installFetch([200, 401, 401]);
+    const pinnedApi = createService();
+    await pinnedApi.listTenants();
+    const beforeApi = apiPinned.mock.calls.length;
+    await expect(pinnedApi.listTenants()).rejects.toBeInstanceOf(McpError);
+    const apiLater = apiPinned.mock.calls.slice(beforeApi);
+    const apiCalls = apiLater.filter(([url]) => String(url).includes('/api/ListTenants'));
+    const apiTokens = apiLater.filter(([url]) => String(url).includes('/oauth2/v2.0/token'));
+    expect(apiCalls).toHaveLength(2);
+    expect(authorization(apiCalls[0][1])).toBe(`Bearer api-token:${API_SCOPE}`);
+    expect(authorization(apiCalls[1][1])).toBe('Bearer legacy-token');
+    expect(apiTokens).toHaveLength(1);
+    expect(tokenScope(apiTokens[0][1])).toBe(LEGACY_SCOPE);
   });
 });
 

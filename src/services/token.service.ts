@@ -28,9 +28,11 @@ export interface TokenProviderConfig {
    */
   scope?: string;
   /**
-   * When no explicit scope is set, a CIPP HTTP 401 may be retried once with
-   * the legacy bare-GUID scope `<clientId>/.default`. Defaults to enabled.
-   * Set false via `CIPP_TOKEN_SCOPE_FALLBACK` / `TOKEN_SCOPE_FALLBACK` or the
+   * When no explicit scope is set, a CIPP HTTP 401 is retried once with the
+   * other automatic audience (`api://<clientId>/.default` or the legacy
+   * `<clientId>/.default`). The audience that succeeds is remembered, and a
+   * later 401 tries the other one once. Defaults to enabled. Set false via
+   * `CIPP_TOKEN_SCOPE_FALLBACK` / `TOKEN_SCOPE_FALLBACK` or the
    * `x-token-scope-fallback` header.
    */
   scopeFallback?: boolean;
@@ -136,15 +138,19 @@ export class TokenProvider {
   }
 
   /**
-   * Legacy scope to mint after a CIPP 401, or `undefined` when a retry must
-   * not happen: an explicit scope was configured, fallback is disabled, or
-   * the legacy scope is already the one in use (a second try would repeat it).
+   * The other automatic audience to try after a CIPP 401, or `undefined`
+   * when a retry must not happen (an explicit scope was configured, or
+   * fallback is disabled). A pinned legacy scope alternates to `api://`,
+   * and a pinned or default `api://` scope alternates to the legacy scope.
+   * Callers retry once with this value; it is not a loop.
    */
-  legacyFallbackScope(): string | undefined {
+  alternateScope(): string | undefined {
     if (this.explicitScope !== undefined) return undefined;
     if (!this.scopeFallback) return undefined;
-    if (this.activeScope === this.legacyScope) return undefined;
-    return this.legacyScope;
+    const apiScope = apiDefaultScope(this.config.clientId);
+    if (this.activeScope === this.legacyScope) return apiScope;
+    if (this.activeScope === apiScope) return this.legacyScope;
+    return undefined;
   }
 
   /**
@@ -154,6 +160,16 @@ export class TokenProvider {
   pinSuccessfulScope(scope: string): void {
     if (this.explicitScope !== undefined || !this.scopeFallback) return;
     pinnedScopes.set(this.clientKey, scope);
+  }
+
+  /**
+   * Forget the audience remembered for this client. A 401 on the pinned
+   * scope clears it before the one alternate retry, so a CIPP that changes
+   * which audience it allows is not stuck until process restart.
+   */
+  clearPinnedScope(): void {
+    if (this.explicitScope !== undefined || !this.scopeFallback) return;
+    pinnedScopes.delete(this.clientKey);
   }
 
   /**

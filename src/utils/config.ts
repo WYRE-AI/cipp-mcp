@@ -29,8 +29,8 @@ export interface EnvironmentConfig {
     /** Optional OAuth scope override. When set, the legacy-scope fallback is off. */
     tokenScope?: string;
     /**
-     * Whether a CIPP HTTP 401 may be retried once with the legacy bare-GUID
-     * scope. Resolved from the environment; defaults to `true`.
+     * Whether a CIPP HTTP 401 may be retried once with the other automatic
+     * audience. Resolved from the environment; defaults to `true`.
      */
     tokenScopeFallback?: boolean;
     /** Optional token endpoint URL override. */
@@ -81,7 +81,7 @@ export interface GatewayCredentials {
   /**
    * Parsed `x-token-scope-fallback` / `X_TOKEN_SCOPE_FALLBACK`. `undefined`
    * means the header was absent and the caller should use the env default.
-   * `false` disables the one-shot legacy-scope retry.
+   * `false` disables the one-shot alternate-scope retry.
    */
   tokenScopeFallback?: boolean;
   /** Optional token endpoint URL override. Maps from `X_TOKEN_URL` / `x-token-url`. */
@@ -231,7 +231,7 @@ export function parseCredentialsFromHeaders(
  * | `CIPP_CLIENT_ID`    | OAuth client ID of the CIPP API-client app reg      | –                |
  * | `CIPP_CLIENT_SECRET`| OAuth client secret                                 | –                |
  * | `CIPP_TOKEN_SCOPE`  | Override OAuth scope. Disables legacy fallback.     | `api://<clientId>/.default` |
- * | `CIPP_TOKEN_SCOPE_FALLBACK` | Retry a CIPP 401 once with `<clientId>/.default`. Alias: `TOKEN_SCOPE_FALLBACK`. Header: `x-token-scope-fallback`. | `true` |
+ * | `CIPP_TOKEN_SCOPE_FALLBACK` | On a CIPP 401, retry once with the other automatic audience. Alias: `TOKEN_SCOPE_FALLBACK`. Header: `x-token-scope-fallback`. | `true` |
  * | `CIPP_TOKEN_URL`    | Override OAuth token endpoint URL                   | Entra v2.0       |
  * | `AUTH_MODE`         | `env` (default) or `gateway`                        | `env`            |
  * | `MCP_TRANSPORT`     | `stdio` (default) or `http`                         | `stdio`          |

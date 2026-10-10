@@ -208,10 +208,13 @@ Application ID URI CIPP's App Service authentication allows. A token requested
 for the bare `<clientId>/.default` scope has its `aud` set to the client id
 GUID, and App Service auth rejects it with HTTP 401 and an empty body.
 Deployments that still expect that legacy audience are handled automatically:
-when no explicit scope is configured, the first 401 is retried once with
-`<clientId>/.default`, and the audience that succeeds is reused for later
-calls from the same client. The retry does not run for any other status
-(403, 500, and so on), and it does not repeat. Set `CIPP_TOKEN_SCOPE` to force
+when no explicit scope is configured, a 401 is retried once with the other
+automatic audience (`api://<clientId>/.default` or `<clientId>/.default`).
+The audience that succeeds is reused for later calls from the same client.
+If that audience later starts failing with 401, the pin is dropped and the
+other audience is tried once, then whichever succeeds is remembered again.
+The retry does not run for any other status (403, 500, and so on), and a
+single request never tries more than once. Set `CIPP_TOKEN_SCOPE` to force
 a scope, or `CIPP_TOKEN_SCOPE_FALLBACK=false` (alias `TOKEN_SCOPE_FALLBACK`,
 gateway header `x-token-scope-fallback`) to skip the retry.
 
