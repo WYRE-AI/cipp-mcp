@@ -227,6 +227,10 @@ Tool categories:
             return;
           }
 
+          // Header wins; otherwise the process env (default on). `??` keeps an explicit false.
+          const tokenScopeFallback =
+            credentials.tokenScopeFallback ?? this.envConfig?.cipp.tokenScopeFallback;
+
           const requestConfig: McpServerConfig = {
             name: this.config.name,
             version: this.config.version,
@@ -238,6 +242,7 @@ Tool categories:
               ...(credentials.clientSecret !== undefined ? { clientSecret: credentials.clientSecret } : {}),
               ...(credentials.tokenScope !== undefined ? { tokenScope: credentials.tokenScope } : {}),
               ...(credentials.tokenUrl !== undefined ? { tokenUrl: credentials.tokenUrl } : {}),
+              ...(tokenScopeFallback !== undefined ? { tokenScopeFallback } : {}),
             },
           };
 

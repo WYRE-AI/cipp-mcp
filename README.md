@@ -50,7 +50,8 @@ Set these environment variables (or copy `.env.example` to `.env`):
 | `CIPP_TENANT_ID` | One of | Entra tenant ID that owns the CIPP API-client app registration. |
 | `CIPP_CLIENT_ID` | One of | OAuth client ID issued by CIPP's API Client Management page. |
 | `CIPP_CLIENT_SECRET` | One of | OAuth client secret paired with `CIPP_CLIENT_ID`. |
-| `CIPP_TOKEN_SCOPE` | No | Override OAuth scope (default: `<clientId>/.default`). |
+| `CIPP_TOKEN_SCOPE` | No | Override OAuth scope. Default: `api://<clientId>/.default`. An explicit value disables the legacy-scope fallback below. |
+| `CIPP_TOKEN_SCOPE_FALLBACK` | No | When no explicit scope is set, retry a CIPP HTTP 401 once with the legacy `<clientId>/.default` scope and reuse whichever audience this client accepts. Default: `true`. `TOKEN_SCOPE_FALLBACK` is an alias. Gateway requests can send `x-token-scope-fallback`. |
 | `CIPP_TOKEN_URL` | No | Override OAuth token endpoint (sovereign clouds only). |
 | `MCP_TRANSPORT` | No | `stdio` (default) or `http` |
 | `MCP_HTTP_PORT` | No | Port for HTTP mode (default: 8080) |
@@ -201,6 +202,18 @@ its expiry.
 If you already have a static Bearer token (older CIPP deployments), set
 `CIPP_API_KEY` instead and leave the OAuth variables unset. When both are
 provided, `CIPP_API_KEY` wins.
+
+The access token is requested for `api://<clientId>/.default`. That is the
+Application ID URI CIPP's App Service authentication allows. A token requested
+for the bare `<clientId>/.default` scope has its `aud` set to the client id
+GUID, and App Service auth rejects it with HTTP 401 and an empty body.
+Deployments that still expect that legacy audience are handled automatically:
+when no explicit scope is configured, the first 401 is retried once with
+`<clientId>/.default`, and the audience that succeeds is reused for later
+calls from the same client. The retry does not run for any other status
+(403, 500, and so on), and it does not repeat. Set `CIPP_TOKEN_SCOPE` to force
+a scope, or `CIPP_TOKEN_SCOPE_FALLBACK=false` (alias `TOKEN_SCOPE_FALLBACK`,
+gateway header `x-token-scope-fallback`) to skip the retry.
 
 ## Finding your Function App URL
 

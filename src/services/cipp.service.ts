@@ -32,6 +32,11 @@ interface CippServiceConfig {
     clientSecret?: string;
     tokenScope?: string;
     tokenUrl?: string;
+    /**
+     * When `false`, a CIPP HTTP 401 is not retried with the legacy bare-GUID
+     * scope. Omitted means the fallback is enabled.
+     */
+    tokenScopeFallback?: boolean;
   };
 }
 
@@ -694,7 +699,8 @@ export class CippService {
   private readonly logger: Logger;
 
   constructor(config: CippServiceConfig, logger: Logger) {
-    const { baseUrl, apiKey, tenantId, clientId, clientSecret, tokenScope, tokenUrl } = config.cipp;
+    const { baseUrl, apiKey, tenantId, clientId, clientSecret, tokenScope, tokenUrl, tokenScopeFallback } =
+      config.cipp;
     this.baseUrl = baseUrl ? baseUrl.replace(/\/$/, '') : undefined;
     this.apiKey = apiKey;
     this.logger = logger;
@@ -708,6 +714,8 @@ export class CippService {
           tenantId,
           clientId,
           clientSecret,
+          // `false` must survive; only an explicit false disables the fallback.
+          scopeFallback: tokenScopeFallback !== false,
           ...(tokenScope !== undefined ? { scope: tokenScope } : {}),
           ...(tokenUrl !== undefined ? { tokenUrl } : {}),
         },
@@ -750,8 +758,6 @@ export class CippService {
       );
     }
 
-    const bearer = this.apiKey ?? (await this.tokenProvider!.getAccessToken());
-
     const url = new URL(`${this.baseUrl}/api/${path}`);
 
     if (method === 'GET' && params) {
@@ -762,14 +768,8 @@ export class CippService {
       }
     }
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${bearer}`,
-      'Content-Type': 'application/json',
-    };
-
     const requestInit: RequestInit = {
       method,
-      headers,
     };
 
     if (method !== 'GET' && body !== undefined) {
@@ -782,18 +782,53 @@ export class CippService {
       requestInit.signal = AbortSignal.timeout(timeoutMs);
     }
 
-    this.logger.debug('CIPP API request', { method, url: url.toString() });
+    const send = async (bearer: string): Promise<Response> => {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${bearer}`,
+        'Content-Type': 'application/json',
+      };
+      this.logger.debug('CIPP API request', { method, url: url.toString() });
+      try {
+        return await fetch(url.toString(), { ...requestInit, headers });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error('CIPP API network error', { method, url: url.toString(), error: message });
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Network error communicating with CIPP API (${method} ${url.toString()}): ${message}`
+        );
+      }
+    };
 
-    let response: Response;
-    try {
-      response = await fetch(url.toString(), requestInit);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.error('CIPP API network error', { method, url: url.toString(), error: message });
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Network error communicating with CIPP API (${method} ${url.toString()}): ${message}`
-      );
+    const bearer = this.apiKey ?? (await this.tokenProvider!.getAccessToken());
+    let response = await send(bearer);
+
+    // One shot, and only for 401. The token was minted for api://<clientId>,
+    // which is what current CIPP App Service auth allows. A deployment that
+    // still only accepts the legacy bare-GUID audience rejects that token
+    // with HTTP 401; retry the same request once with `<clientId>/.default`.
+    // Any other status is returned as-is. This is not a loop: the retry is a
+    // single extra send, and legacyFallbackScope() is undefined once that
+    // scope is already the one in use.
+    const fallbackScope =
+      !response.ok && response.status === 401 ? this.tokenProvider?.legacyFallbackScope() : undefined;
+    let usedLegacyFallback = false;
+    if (fallbackScope) {
+      usedLegacyFallback = true;
+      // Release the rejected response body before opening the retry.
+      await response.text().catch(() => undefined);
+      this.logger.warn('CIPP rejected the access token with HTTP 401; retrying once with the legacy scope', {
+        method,
+        url: url.toString(),
+        scope: fallbackScope,
+      });
+      const legacyBearer = await this.tokenProvider!.getAccessTokenForScope(fallbackScope);
+      response = await send(legacyBearer);
+      if (response.ok) {
+        this.tokenProvider!.pinSuccessfulScope(fallbackScope);
+      }
+    } else if (response.ok && this.tokenProvider) {
+      this.tokenProvider.pinSuccessfulScope(this.tokenProvider.activeScope);
     }
 
     if (!response.ok) {
@@ -809,9 +844,13 @@ export class CippService {
         status: response.status,
         body: responseBody,
       });
+      const fallbackNote =
+        usedLegacyFallback && response.status === 401
+          ? ` Retried once with legacy scope ${fallbackScope}; that token was also rejected.`
+          : '';
       throw new McpError(
         ErrorCode.InternalError,
-        `CIPP API returned HTTP ${response.status} for ${method} ${url.toString()}: ${responseBody}`
+        `CIPP API returned HTTP ${response.status} for ${method} ${url.toString()}: ${responseBody}${fallbackNote}`
       );
     }
 
@@ -870,15 +909,22 @@ export class CippService {
 
   /**
    * List all managed tenants known to CIPP.
-   * Calls the `ListTenants` Azure Function.
+   * Calls the `ListTenants` Azure Function with GET.
+   *
+   * `Invoke-ListTenants` reads `AllTenantSelector` from the query string
+   * (`$Request.Query.AllTenantSelector`). When it is `$true`, CIPP prepends
+   * the `*All Tenants` row. The flag is not read from the body, so it has to
+   * travel as a query parameter — which is also the method CIPP documents.
    *
    * @param params - Optional listing options.
-   * @param params.allTenants - When `true`, returns all tenants including inactive ones.
+   * @param params.allTenants - When `true`, includes the `*All Tenants` row.
    */
   async listTenants<T = unknown>(params?: { allTenants?: boolean }): Promise<T> {
-    return this.request<T>('POST', 'ListTenants', undefined, {
-      allTenantSelector: params?.allTenants,
-    });
+    const query: Record<string, unknown> = {};
+    if (typeof params?.allTenants === 'boolean') {
+      query.AllTenantSelector = params.allTenants;
+    }
+    return this.request<T>('GET', 'ListTenants', query);
   }
 
   /**
