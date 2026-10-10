@@ -800,24 +800,38 @@ export class CippService {
       }
     };
 
-    const bearer = this.apiKey ?? (await this.tokenProvider!.getAccessToken());
+    // Captured before the send and passed into the mint, so a concurrent
+    // request that pins the other audience cannot change which token this
+    // call uses or which audience a 401 retries.
+    let attemptedScope: string | undefined;
+    let bearer: string;
+    if (this.apiKey) {
+      bearer = this.apiKey;
+    } else {
+      attemptedScope = this.tokenProvider!.activeScope;
+      bearer = await this.tokenProvider!.getAccessToken(attemptedScope);
+    }
     let response = await send(bearer);
 
     // One shot, and only for 401. The two automatic audiences are
     // api://<clientId>/.default and the legacy <clientId>/.default. A 401
     // clears any pin and retries the same request once with the other one,
-    // then re-pins whichever succeeds. Any other status is returned as-is.
-    // This is not a loop: alternateScope() is read once, and the retry is a
+    // chosen from the scope that was actually sent, then re-pins whichever
+    // succeeds. Any other status is returned as-is. This is not a loop: the
+    // alternate is computed once from `attemptedScope`, and the retry is a
     // single extra send even if that also returns 401.
     const fallbackScope =
-      !response.ok && response.status === 401 ? this.tokenProvider?.alternateScope() : undefined;
+      !response.ok && response.status === 401 && attemptedScope
+        ? this.tokenProvider?.alternateScope(attemptedScope)
+        : undefined;
     let retriedAlternate = false;
     if (fallbackScope) {
       retriedAlternate = true;
       // Release the rejected response body before opening the retry.
       await response.text().catch(() => undefined);
       // Drop the pin before the retry so a rejected audience cannot outlive
-      // this call. The alternate was already chosen from the scope that failed.
+      // this call. `fallbackScope` was chosen from `attemptedScope`, not from
+      // the pin, which another request may already have changed.
       this.tokenProvider!.clearPinnedScope();
       this.logger.warn('CIPP rejected the access token with HTTP 401; retrying once with the other scope', {
         method,
@@ -829,8 +843,8 @@ export class CippService {
       if (response.ok) {
         this.tokenProvider!.pinSuccessfulScope(fallbackScope);
       }
-    } else if (response.ok && this.tokenProvider) {
-      this.tokenProvider.pinSuccessfulScope(this.tokenProvider.activeScope);
+    } else if (response.ok && attemptedScope) {
+      this.tokenProvider!.pinSuccessfulScope(attemptedScope);
     }
 
     if (!response.ok) {

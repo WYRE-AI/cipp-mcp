@@ -138,18 +138,22 @@ export class TokenProvider {
   }
 
   /**
-   * The other automatic audience to try after a CIPP 401, or `undefined`
-   * when a retry must not happen (an explicit scope was configured, or
-   * fallback is disabled). A pinned legacy scope alternates to `api://`,
-   * and a pinned or default `api://` scope alternates to the legacy scope.
-   * Callers retry once with this value; it is not a loop.
+   * The other automatic audience to try after a CIPP 401 on `rejectedScope`,
+   * or `undefined` when a retry must not happen (an explicit scope was
+   * configured, or fallback is disabled).
+   *
+   * `rejectedScope` is the audience of the token that CIPP just refused. It
+   * must be the value captured for that send: reading {@link activeScope}
+   * here would race with another request pinning a different audience while
+   * this one is still waiting on its 401, and the retry would repeat the
+   * audience that already failed. Callers retry once with this value.
    */
-  alternateScope(): string | undefined {
+  alternateScope(rejectedScope: string): string | undefined {
     if (this.explicitScope !== undefined) return undefined;
     if (!this.scopeFallback) return undefined;
     const apiScope = apiDefaultScope(this.config.clientId);
-    if (this.activeScope === this.legacyScope) return apiScope;
-    if (this.activeScope === apiScope) return this.legacyScope;
+    if (rejectedScope === this.legacyScope) return apiScope;
+    if (rejectedScope === apiScope) return this.legacyScope;
     return undefined;
   }
 
@@ -173,12 +177,15 @@ export class TokenProvider {
   }
 
   /**
-   * Return a valid access token for {@link activeScope}, acquiring or
-   * refreshing as needed. Concurrent callers for the same scope share one
-   * in-flight request.
+   * Return a valid access token, acquiring or refreshing as needed.
+   * Concurrent callers for the same scope share one in-flight request.
+   *
+   * Pass `scope` to mint that audience even if another request changes the
+   * pin while this call is in flight. Omitted means {@link activeScope} at
+   * the moment of the call.
    */
-  async getAccessToken(): Promise<string> {
-    return this.tokenFor(this.activeScope);
+  async getAccessToken(scope?: string): Promise<string> {
+    return this.tokenFor(scope ?? this.activeScope);
   }
 
   /**

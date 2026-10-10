@@ -344,6 +344,66 @@ describe('OAuth token scope', () => {
     expect(apiTokens).toHaveLength(1);
     expect(tokenScope(apiTokens[0][1])).toBe(LEGACY_SCOPE);
   });
+
+  it('retries the other audience when a concurrent request pins legacy during the 401', async () => {
+    interface HeldCall {
+      auth: string | undefined;
+      resolve: (response: Response) => void;
+    }
+    const cippCalls: HeldCall[] = [];
+
+    global.fetch = jest.fn((url: string, init?: RequestInit) => {
+      if (String(url).includes('/oauth2/v2.0/token')) {
+        const scope = tokenScope(init);
+        const accessToken = scope === LEGACY_SCOPE ? 'legacy-token' : `api-token:${scope}`;
+        return Promise.resolve(jsonResponse({ access_token: accessToken, expires_in: 3600 }));
+      }
+      return new Promise<Response>((resolve) => {
+        cippCalls.push({ auth: authorization(init), resolve });
+      });
+    }) as unknown as typeof fetch;
+
+    const pendingA = createService().listTenants();
+    const pendingB = createService().listTenants();
+    const waitForCalls = async (count: number): Promise<void> => {
+      for (let i = 0; i < 20 && cippCalls.length < count; i += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (cippCalls.length < count) {
+        throw new Error(`expected ${count} CIPP calls, saw ${cippCalls.length}`);
+      }
+    };
+
+    try {
+      await waitForCalls(2);
+      // Both in-flight calls still carry the api:// token.
+      expect(cippCalls[0].auth).toBe(`Bearer api-token:${API_SCOPE}`);
+      expect(cippCalls[1].auth).toBe(`Bearer api-token:${API_SCOPE}`);
+
+      // A's api:// token is rejected. Its retry succeeds and pins legacy
+      // while B is still waiting on the same audience.
+      cippCalls[0].resolve(errorResponse(401, ''));
+      await waitForCalls(3);
+      expect(cippCalls[2].auth).toBe('Bearer legacy-token');
+      cippCalls[2].resolve(jsonResponse([{ customerId: 'contoso' }]));
+      await expect(pendingA).resolves.toEqual([{ customerId: 'contoso' }]);
+
+      // B's original api:// call is rejected only after that pin exists.
+      // The retry must use legacy, not the api:// audience that just failed.
+      cippCalls[1].resolve(errorResponse(401, ''));
+      await waitForCalls(4);
+      expect(cippCalls[3].auth).toBe('Bearer legacy-token');
+      expect(cippCalls).toHaveLength(4);
+
+      cippCalls[3].resolve(jsonResponse([{ customerId: 'contoso' }]));
+      await expect(pendingB).resolves.toEqual([{ customerId: 'contoso' }]);
+    } finally {
+      for (const call of cippCalls) {
+        call.resolve(errorResponse(401, ''));
+      }
+      await Promise.allSettled([pendingA, pendingB]);
+    }
+  });
 });
 
 describe('token scope fallback configuration', () => {
