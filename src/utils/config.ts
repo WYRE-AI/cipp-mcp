@@ -26,8 +26,13 @@ export interface EnvironmentConfig {
     clientId?: string;
     /** App registration client secret for OAuth client-credentials flow. */
     clientSecret?: string;
-    /** Optional OAuth scope override. */
+    /** Optional OAuth scope override. When set, the legacy-scope fallback is off. */
     tokenScope?: string;
+    /**
+     * Whether a CIPP HTTP 401 may be retried once with the other automatic
+     * audience. Resolved from the environment; defaults to `true`.
+     */
+    tokenScopeFallback?: boolean;
     /** Optional token endpoint URL override. */
     tokenUrl?: string;
   };
@@ -73,8 +78,42 @@ export interface GatewayCredentials {
   clientSecret: string | undefined;
   /** Optional OAuth scope override. Maps from `X_TOKEN_SCOPE` / `x-token-scope`. */
   tokenScope: string | undefined;
+  /**
+   * Parsed `x-token-scope-fallback` / `X_TOKEN_SCOPE_FALLBACK`. `undefined`
+   * means the header was absent and the caller should use the env default.
+   * `false` disables the one-shot alternate-scope retry.
+   */
+  tokenScopeFallback?: boolean;
   /** Optional token endpoint URL override. Maps from `X_TOKEN_URL` / `x-token-url`. */
   tokenUrl: string | undefined;
+}
+
+/**
+ * Values that turn the legacy-scope fallback off. Anything else, including
+ * an unset variable, leaves it on.
+ */
+const SCOPE_FALLBACK_OFF = /^(0|false|off|no)$/i;
+
+/**
+ * Parse a scope-fallback flag.
+ *
+ * Returns `undefined` when the value is absent, blank, or an unresolved
+ * manifest placeholder, so the caller can apply the default (enabled) or an
+ * env-level setting. Returns `false` only for an explicit off switch.
+ */
+export function parseTokenScopeFallback(value: string | undefined): boolean | undefined {
+  const cleaned = cleanCredential(value);
+  if (cleaned === undefined) return undefined;
+  return !SCOPE_FALLBACK_OFF.test(cleaned);
+}
+
+/** First credential-shaped value among `values`, ignoring blanks and placeholders. */
+function firstCredential(...values: (string | undefined)[]): string | undefined {
+  for (const value of values) {
+    const cleaned = cleanCredential(value);
+    if (cleaned !== undefined) return cleaned;
+  }
+  return undefined;
 }
 
 // An unresolved MCPB/DXT manifest placeholder, e.g. "${user_config.cipp_api_key}".
@@ -121,6 +160,7 @@ export function sanitizeCredentials(creds: GatewayCredentials): GatewayCredentia
     clientSecret: cleanCredential(creds.clientSecret),
     tokenScope: cleanCredential(creds.tokenScope),
     tokenUrl: cleanCredential(creds.tokenUrl),
+    ...(creds.tokenScopeFallback !== undefined ? { tokenScopeFallback: creds.tokenScopeFallback } : {}),
   };
 }
 
@@ -140,6 +180,13 @@ export function getCredentialsFromGateway(): GatewayCredentials {
     clientSecret: process.env.X_CLIENT_SECRET || process.env.CIPP_CLIENT_SECRET,
     tokenScope: process.env.X_TOKEN_SCOPE || process.env.CIPP_TOKEN_SCOPE,
     tokenUrl: process.env.X_TOKEN_URL || process.env.CIPP_TOKEN_URL,
+    tokenScopeFallback: parseTokenScopeFallback(
+      firstCredential(
+        process.env.X_TOKEN_SCOPE_FALLBACK,
+        process.env.CIPP_TOKEN_SCOPE_FALLBACK,
+        process.env.TOKEN_SCOPE_FALLBACK
+      )
+    ),
   });
 }
 
@@ -168,6 +215,7 @@ export function parseCredentialsFromHeaders(
     clientSecret: getHeader('x-client-secret'),
     tokenScope: getHeader('x-token-scope'),
     tokenUrl: getHeader('x-token-url'),
+    tokenScopeFallback: parseTokenScopeFallback(getHeader('x-token-scope-fallback')),
   });
 }
 
@@ -182,7 +230,8 @@ export function parseCredentialsFromHeaders(
  * | `CIPP_TENANT_ID`    | Entra tenant ID (OAuth client-credentials flow)     | –                |
  * | `CIPP_CLIENT_ID`    | OAuth client ID of the CIPP API-client app reg      | –                |
  * | `CIPP_CLIENT_SECRET`| OAuth client secret                                 | –                |
- * | `CIPP_TOKEN_SCOPE`  | Override OAuth scope                                | `<clientId>/.default` |
+ * | `CIPP_TOKEN_SCOPE`  | Override OAuth scope. Disables legacy fallback.     | `api://<clientId>/.default` |
+ * | `CIPP_TOKEN_SCOPE_FALLBACK` | On a CIPP 401, retry once with the other automatic audience. Alias: `TOKEN_SCOPE_FALLBACK`. Header: `x-token-scope-fallback`. | `true` |
  * | `CIPP_TOKEN_URL`    | Override OAuth token endpoint URL                   | Entra v2.0       |
  * | `AUTH_MODE`         | `env` (default) or `gateway`                        | `env`            |
  * | `MCP_TRANSPORT`     | `stdio` (default) or `http`                         | `stdio`          |
@@ -211,6 +260,9 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
         clientSecret: process.env.CIPP_CLIENT_SECRET,
         tokenScope: process.env.CIPP_TOKEN_SCOPE,
         tokenUrl: process.env.CIPP_TOKEN_URL,
+        tokenScopeFallback: parseTokenScopeFallback(
+          firstCredential(process.env.CIPP_TOKEN_SCOPE_FALLBACK, process.env.TOKEN_SCOPE_FALLBACK)
+        ),
       });
 
   // Build the cipp sub-object, omitting undefined values so that
@@ -223,6 +275,9 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
   if (creds.clientSecret) cippConfig.clientSecret = creds.clientSecret;
   if (creds.tokenScope) cippConfig.tokenScope = creds.tokenScope;
   if (creds.tokenUrl) cippConfig.tokenUrl = creds.tokenUrl;
+  // Default on. An explicit false from the env (or the gateway header path
+  // that feeds getCredentialsFromGateway) is preserved.
+  cippConfig.tokenScopeFallback = creds.tokenScopeFallback ?? true;
 
   const transportType = (process.env.MCP_TRANSPORT as TransportType) || 'stdio';
   if (transportType !== 'stdio' && transportType !== 'http') {
@@ -278,6 +333,8 @@ export function mergeWithMcpConfig(
       clientSecret: mcpArgs?.cipp?.clientSecret || envConfig.cipp.clientSecret,
       tokenScope: mcpArgs?.cipp?.tokenScope || envConfig.cipp.tokenScope,
       tokenUrl: mcpArgs?.cipp?.tokenUrl || envConfig.cipp.tokenUrl,
+      // `??` so an explicit `false` is not replaced by the env default.
+      tokenScopeFallback: mcpArgs?.cipp?.tokenScopeFallback ?? envConfig.cipp.tokenScopeFallback,
     },
   };
 }

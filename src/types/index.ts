@@ -32,8 +32,18 @@ export interface McpServerConfig {
     clientId?: string;
     /** Application secret value issued for the CIPP API client. */
     clientSecret?: string;
-    /** Optional OAuth scope override. Defaults to `<clientId>/.default`. */
+    /**
+     * Optional OAuth scope override. When omitted, the token is requested for
+     * `api://<clientId>/.default`. An explicit value disables the legacy-scope
+     * fallback.
+     */
     tokenScope?: string;
+    /**
+     * When `false`, a CIPP HTTP 401 is not retried with the legacy
+     * `<clientId>/.default` scope. Omitted or `true` keeps that one retry
+     * enabled and caches whichever audience the client accepts.
+     */
+    tokenScopeFallback?: boolean;
     /** Optional full token endpoint URL override (sovereign clouds / custom STS). */
     tokenUrl?: string;
   };
