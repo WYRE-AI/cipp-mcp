@@ -4,11 +4,11 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/CyberDrain/CIP
 
 ## Features
 
-- **46 tools** across 12 categories
+- **49 tools** across 12 categories
 - Tenant, user, group, and mailbox management
 - Mailbox and online-archive size reporting, per tenant or per user
 - Per-user Entra ID sign-in logs (status, location, Conditional Access, MFA)
-- Security: Conditional Access policies, named locations
+- Security: Conditional Access policies, named locations, Microsoft Secure Score
 - Standards & compliance: BPA, domain health, drift detection
 - License reporting (per-tenant and CSP-wide)
 - Alerts, audit logs, and scheduled tasks
@@ -97,8 +97,8 @@ Add to your `claude_desktop_config.json`:
 | Tenants | list_tenants, get_tenant_details |
 | Users | list_users, create_user, edit_user, disable_user, reset_password, reset_mfa, revoke_sessions, offboard_user, bec_check, list_mfa_users, list_user_devices, list_user_groups, list_user_signin_logs |
 | Groups | list_groups, create_group |
-| Mailboxes | list_mailboxes, list_mailbox_permissions, list_mailbox_usage, get_mailbox_usage, set_out_of_office, set_email_forwarding |
-| Security | list_conditional_access_policies, list_named_locations |
+| Mailboxes | list_mailboxes, list_mailbox_permissions, list_trusted_blocked_senders, list_mailbox_usage, get_mailbox_usage, set_out_of_office, set_email_forwarding |
+| Security | list_conditional_access_policies, list_named_locations, get_secure_score, list_secure_score_controls |
 | Applications | list_enterprise_apps |
 | Standards | list_standards, run_standards_check, list_standard_templates, get_tenant_drift, get_tenant_alignment, create_standard_template, delete_standard_template, list_bpa, list_domain_health |
 | Licenses | list_licenses, list_csp_licenses |
@@ -157,6 +157,36 @@ flagged — plus a summary of failures, distinct IPs and countries.
 - **Needs Entra ID P1/P2 in the tenant.** Graph refuses sign-in log API access
   otherwise; the tool names the licence gap instead of relaying a generic
   "Failed to retrieve Sign In report".
+
+### Microsoft Secure Score
+
+`get_secure_score` returns one tenant's latest Secure Score and its recent
+daily history. `list_secure_score_controls` returns the recommendation
+catalog: titles, rank, max points, cost, remediation, threats, and any
+decision to mark a control resolved by a third party or ignored.
+
+CIPP has no dedicated Secure Score read endpoint. The only Secure Score HTTP
+function is `ExecUpdateSecureScore`, which updates a control and is not
+exposed here. Both tools call `ListGraphRequest`, which is what CIPP's own
+Secure Score page does, with `Endpoint` set to `security/secureScores` or
+`security/secureScoreControlProfiles`.
+
+- **One tenant.** `allTenants` is rejected. CIPP's estate view is the nightly
+  score cache, not a live Graph call, and these tools do not read that cache.
+- **`top` limits history only when pagination is turned off.** `ListGraphRequest`
+  treats `$top` as Graph's page size and follows every next link unless
+  `NoPagination` is set. `get_secure_score` always sends both, so `top`
+  (default 7, maximum 90) is the number of daily readings returned. The
+  control catalog leaves pagination on, with a page size of 999, so the full
+  list comes back.
+- **An empty result is not a score of zero.** A tenant that has not been
+  scored yet, or whose CIPP app is missing `SecurityEvents.Read.All`, comes
+  back as no reading with a warning. A permission denial names that Graph
+  permission instead of a generic CIPP HTTP 400.
+- **Comparisons are matched by `basis`.** "All tenants" is `AllTenants` and
+  "similar tenants" is `TotalSeats`. Those figures are already percentages.
+  The percentage of the tenant's own score is `currentScore / maxScore`, and
+  it is omitted when the maximum is missing rather than reported as 0%.
 
 ### CIPP version compatibility
 
