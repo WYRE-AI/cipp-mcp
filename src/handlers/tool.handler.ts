@@ -333,6 +333,18 @@ export class CippToolHandler {
           break;
         }
 
+        case 'cipp_get_secure_score': {
+          const { tenantFilter, top } = args as { tenantFilter: string; top?: number };
+          result = await this.cippService.getSecureScore(tenantFilter, { top });
+          break;
+        }
+
+        case 'cipp_list_secure_score_controls': {
+          const { tenantFilter } = args as { tenantFilter: string };
+          result = await this.cippService.listSecureScoreControls(tenantFilter);
+          break;
+        }
+
         // -----------------------------------------------------------------------
         // Applications
         // -----------------------------------------------------------------------

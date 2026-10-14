@@ -573,7 +573,7 @@ function booleanField(value: unknown): boolean | undefined {
 }
 
 /** Drop keys whose value is `undefined`; return `undefined` if nothing is left. */
-function compact<T extends Record<string, unknown>>(obj: T): T | undefined {
+function compact<T extends object>(obj: T): T | undefined {
   const entries = Object.entries(obj).filter(([, v]) => v !== undefined);
   return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
 }
@@ -673,6 +673,441 @@ function normaliseSignIn(raw: Record<string, unknown>): SignInLogRow {
     correlationId: stringField(raw.correlationId),
     id: stringField(raw.id),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Secure Score
+//
+// There is no Invoke-ListSecureScore. KelvinTegelaar/CIPP-API's only Secure
+// Score HTTP entrypoint is Invoke-ExecUpdateSecureScore, which PATCHes a
+// control profile — a write. CIPP's own Secure Score page
+// (frontend/src/hooks/use-securescore.js) reads through ListGraphRequest:
+//   security/secureScores                  $top=7  noPagination=true
+//   security/secureScoreControlProfiles     $top=999  (pagination left on)
+// and refuses AllTenants, because that view is the nightly cache.
+//
+// Invoke-ListGraphRequest treats $top as Graph's page size and follows
+// @odata.nextLink to the end unless NoPagination is set. The query bag is
+// case-insensitive; the UI sends `noPagination`, the script reads
+// `NoPagination`. A caller that sends $top without NoPagination asks for one
+// page size and receives the whole collection. $top=1 is the exception:
+// upstream forces NoPagination, so it really does return one row.
+//
+// Success is `{ Results, Metadata }`. Failure is HTTP 400 with a string body
+// `Graph Error: <reason> - Endpoint: <path>`, which `request` already throws.
+// ---------------------------------------------------------------------------
+
+/**
+ * Readings to return when `top` is omitted. CIPP's Secure Score page charts
+ * the last seven, one per day.
+ */
+const SECURE_SCORE_DEFAULT_TOP = 7;
+
+/**
+ * Microsoft Graph's secureScores collection covers about the last 90 days.
+ * Past that, raising `top` does not produce older readings.
+ */
+const SECURE_SCORE_MAX_TOP = 90;
+
+/**
+ * Page size CIPP's control-profile call uses. Not a result limit: pagination
+ * stays on, so a catalog larger than one page is still returned whole.
+ */
+const SECURE_SCORE_CONTROLS_PAGE_SIZE = 999;
+
+/**
+ * Graph replies that mean the CIPP app cannot read Secure Score in this
+ * tenant. ListGraphRequest surfaces them as HTTP 400 `Graph Error: ...`.
+ */
+const GRAPH_ACCESS_DENIED_RE =
+  /Authorization_RequestDenied|ErrorAccessDenied|Insufficient privileges|Access is denied|does not have the required permissions|Forbidden/i;
+
+/** One daily Secure Score reading, without its control breakdown. */
+export interface SecureScoreHistoryPoint {
+  createdDateTime?: string;
+  currentScore?: number;
+  maxScore?: number;
+  /** `currentScore / maxScore`, 0–100, rounded to two decimals. Absent when max is missing or 0. */
+  percentage?: number;
+}
+
+/** Microsoft's comparative percentage. `averageScore` is already a percentage, not points. */
+export interface SecureScoreComparison {
+  /** `AllTenants`, `TotalSeats` (similar size), or `IndustryTypes`. */
+  basis?: string;
+  percentage?: number;
+}
+
+/** Movement from the reading before the latest one. Points are score points, not percent. */
+export interface SecureScoreDelta {
+  points: number;
+  percentagePoints?: number;
+  /** Whole days between the two readings, when both carry a parseable timestamp. */
+  days?: number;
+}
+
+/** One control's achievement on the latest reading. Names match Graph's `controlScore`. */
+export interface SecureScoreControlScore {
+  controlName?: string;
+  category?: string;
+  /** Points achieved. Not the maximum — that lives on the control profile. */
+  score?: number;
+  scoreInPercentage?: number;
+  description?: string;
+  implementationStatus?: string;
+}
+
+/** Counts behind the achievement list. A control with no percentage is `unscored`, not zero. */
+export interface SecureScoreControlSummary {
+  total: number;
+  /** `scoreInPercentage >= 100`. */
+  completed: number;
+  /** Between 0 and 100, exclusive. */
+  inProgress: number;
+  /** `scoreInPercentage <= 0`. */
+  notStarted: number;
+  /** No `scoreInPercentage` at all — not counted as a failure. */
+  unscored: number;
+  items: SecureScoreControlScore[];
+}
+
+/** The newest reading, plus the comparisons and control achievement Graph attaches to it. */
+export interface SecureScoreLatest extends SecureScoreHistoryPoint {
+  id?: string;
+  activeUserCount?: number;
+  licensedUserCount?: number;
+  enabledServices?: string[];
+  comparativeScores: SecureScoreComparison[];
+  /** `basis === AllTenants`. Absent when Graph did not label a comparison that way. */
+  comparedToAllTenants?: number;
+  /** `basis === TotalSeats`, Microsoft's "similar tenants" figure. */
+  comparedToSimilarTenants?: number;
+  changeSincePrevious?: SecureScoreDelta;
+  controls: SecureScoreControlSummary;
+}
+
+/** What {@link CippService.getSecureScore} returns. */
+export interface SecureScoreReport {
+  tenantFilter: string;
+  /** Live Graph, not CIPP's nightly Secure Score cache. */
+  source: 'live';
+  requested: number;
+  returned: number;
+  latest?: SecureScoreLatest;
+  /** Newest first. Includes the latest reading, so the series is complete on its own. */
+  history: SecureScoreHistoryPoint[];
+  warnings?: string[];
+}
+
+/** A non-default state change recorded against a control profile. */
+export interface SecureScoreStateUpdate {
+  state?: string;
+  assignedTo?: string;
+  comment?: string;
+  updatedBy?: string;
+  updatedDateTime?: string;
+}
+
+/** A compliance certification mapped onto a control, trimmed to names. */
+export interface SecureScoreCompliance {
+  name?: string;
+  controls?: string[];
+}
+
+/** One recommendation from `security/secureScoreControlProfiles`. */
+export interface SecureScoreControlProfile {
+  id?: string;
+  title?: string;
+  category?: string;
+  service?: string;
+  maxScore?: number;
+  rank?: number;
+  deprecated?: boolean;
+  implementationCost?: string;
+  userImpact?: string;
+  remediationImpact?: string;
+  tier?: string;
+  actionType?: string;
+  threats?: string[];
+  actionUrl?: string;
+  remediation?: string;
+  compliance?: SecureScoreCompliance[];
+  lastModifiedDateTime?: string;
+  /** `Default` updates are dropped; they only restate Microsoft's own detection. */
+  stateUpdates?: SecureScoreStateUpdate[];
+}
+
+/** What {@link CippService.listSecureScoreControls} returns. */
+export interface SecureScoreControlListing {
+  tenantFilter: string;
+  source: 'live';
+  returned: number;
+  deprecated: number;
+  warnings?: string[];
+  controls: SecureScoreControlProfile[];
+}
+
+/** Round to `places` decimal places. Secure Score figures are fractional. */
+function roundTo(value: number, places: number): number {
+  const factor = 10 ** places;
+  return Math.round(value * factor) / factor;
+}
+
+/** `current / max` as a 0–100 percentage. A missing or zero max yields nothing, not 0%. */
+function percentageOf(current: number | undefined, max: number | undefined): number | undefined {
+  if (current === undefined || max === undefined || max <= 0) return undefined;
+  return roundTo((current / max) * 100, 2);
+}
+
+/** Parse a timestamp for sorting. Undated rows sort last. */
+function scoreTimestamp(raw: Record<string, unknown>): number {
+  const text = stringField(raw.createdDateTime);
+  if (!text) return 0;
+  const ms = Date.parse(text);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/** Keep non-empty strings from a Graph collection. */
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter(nonEmpty);
+  return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Unwrap a ListGraphRequest body into row objects.
+ *
+ * Success is `{ Results, Metadata }`. A queued call comes back HTTP 200 with
+ * an empty `Results` and `Metadata.Queued`, which would otherwise read as
+ * "this tenant has no score". A string — bare, or inside `Results` — is
+ * upstream failure text and is thrown rather than rendered as data.
+ */
+function graphCollectionRows(raw: unknown, endpoint: string): Record<string, unknown>[] {
+  if (typeof raw === 'string') {
+    throw new McpError(
+      ErrorCode.InternalError,
+      `CIPP ListGraphRequest returned a message instead of ${endpoint} records: ${raw}`
+    );
+  }
+
+  let rows: unknown[];
+  if (Array.isArray(raw)) {
+    rows = raw;
+  } else {
+    const body = asRecord(raw);
+    const metadata = asRecord(body.Metadata ?? body.metadata);
+    if (metadata.Queued === true) {
+      const message =
+        stringField(metadata.QueueMessage) ??
+        stringField(metadata.queueMessage) ??
+        'CIPP queued the Graph request and returned no rows.';
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `CIPP queued the ${endpoint} request instead of returning Secure Score data: ${message}`
+      );
+    }
+    const results = body.Results ?? body.results;
+    if (Array.isArray(results)) {
+      rows = results;
+    } else if (results === undefined || results === null) {
+      rows = [];
+    } else {
+      rows = [results];
+    }
+  }
+
+  const strings = rows.filter((row): row is string => typeof row === 'string');
+  if (strings.length > 0) {
+    const { results, failures } = interpretResults(strings);
+    throw new McpError(
+      ErrorCode.InternalError,
+      `CIPP ListGraphRequest returned a message instead of ${endpoint} records: ${(failures.length > 0 ? failures : results).join('; ')}`
+    );
+  }
+
+  // `[null]` is what an empty PowerShell array can collapse to. Drop it.
+  return rows.filter(
+    (row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)
+  );
+}
+
+/** Live Secure Score reads are per tenant. AllTenants is the nightly cache, which this does not call. */
+function assertSecureScoreSingleTenant(tenantFilter: string, tool: string): void {
+  if (tenantFilter.trim().toLowerCase() === 'alltenants') {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `${tool} reads one tenant live through ListGraphRequest. allTenants is not supported: ` +
+        "CIPP's Secure Score page does not call Graph for All Tenants — that view is the nightly " +
+        'cache, which these tools do not expose. Name the tenant domain or ID.'
+    );
+  }
+}
+
+function normaliseScorePoint(raw: Record<string, unknown>): SecureScoreHistoryPoint {
+  const currentScore = numberField(raw.currentScore);
+  const maxScore = numberField(raw.maxScore);
+  return (
+    compact({
+      createdDateTime: stringField(raw.createdDateTime),
+      currentScore,
+      maxScore,
+      percentage: percentageOf(currentScore, maxScore),
+    }) ?? {}
+  );
+}
+
+function normaliseComparative(raw: unknown): SecureScoreComparison[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => {
+      const row = asRecord(entry);
+      return compact<SecureScoreComparison>({
+        basis: stringField(row.basis),
+        percentage: numberField(row.averageScore),
+      });
+    })
+    .filter((entry): entry is SecureScoreComparison => entry !== undefined);
+}
+
+function comparisonPercentage(rows: SecureScoreComparison[], basis: string): number | undefined {
+  return rows.find((row) => row.basis?.toLowerCase() === basis.toLowerCase())?.percentage;
+}
+
+function scoreDelta(
+  current: SecureScoreHistoryPoint,
+  previous: SecureScoreHistoryPoint | undefined
+): SecureScoreDelta | undefined {
+  if (!previous || current.currentScore === undefined || previous.currentScore === undefined) {
+    return undefined;
+  }
+  let days: number | undefined;
+  if (current.createdDateTime && previous.createdDateTime) {
+    const ms = Date.parse(current.createdDateTime) - Date.parse(previous.createdDateTime);
+    if (!Number.isNaN(ms) && ms > 0) days = Math.round(ms / 86_400_000);
+  }
+  return compact({
+    points: roundTo(current.currentScore - previous.currentScore, 2),
+    percentagePoints:
+      current.percentage !== undefined && previous.percentage !== undefined
+        ? roundTo(current.percentage - previous.percentage, 2)
+        : undefined,
+    days,
+  });
+}
+
+function compareControlScores(a: SecureScoreControlScore, b: SecureScoreControlScore): number {
+  const ap = a.scoreInPercentage;
+  const bp = b.scoreInPercentage;
+  if (ap !== undefined && bp !== undefined && ap !== bp) return ap - bp;
+  if (ap !== undefined && bp === undefined) return -1;
+  if (ap === undefined && bp !== undefined) return 1;
+  return (a.controlName ?? '').localeCompare(b.controlName ?? '');
+}
+
+/** Achievement on the latest reading. Lowest completion first, so the open items lead. */
+function summariseControlScores(raw: unknown): SecureScoreControlSummary {
+  const items = (Array.isArray(raw) ? raw : [])
+    .map((entry) => {
+      const row = asRecord(entry);
+      return compact<SecureScoreControlScore>({
+        controlName: stringField(row.controlName),
+        category: stringField(row.controlCategory),
+        score: numberField(row.score),
+        scoreInPercentage: numberField(row.scoreInPercentage),
+        description: stringField(row.description),
+        implementationStatus: stringField(row.implementationStatus),
+      });
+    })
+    .filter((entry): entry is SecureScoreControlScore => entry !== undefined)
+    .sort(compareControlScores);
+
+  let completed = 0;
+  let inProgress = 0;
+  let notStarted = 0;
+  let unscored = 0;
+  for (const item of items) {
+    const pct = item.scoreInPercentage;
+    if (pct === undefined) unscored += 1;
+    else if (pct >= 100) completed += 1;
+    else if (pct <= 0) notStarted += 1;
+    else inProgress += 1;
+  }
+  return { total: items.length, completed, inProgress, notStarted, unscored, items };
+}
+
+function normaliseCompliance(raw: unknown): SecureScoreCompliance[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw
+    .map((entry) => {
+      const row = asRecord(entry);
+      const controlsRaw = row.certificationControls ?? row.controls;
+      const controls = Array.isArray(controlsRaw)
+        ? controlsRaw
+            .map((control) => (typeof control === 'string' ? control : stringField(asRecord(control).name)))
+            .filter(nonEmpty)
+        : undefined;
+      return compact<SecureScoreCompliance>({
+        name: stringField(row.certificationName) ?? stringField(row.complianceName),
+        controls: controls && controls.length > 0 ? controls : undefined,
+      });
+    })
+    .filter((entry): entry is SecureScoreCompliance => entry !== undefined);
+  return items.length > 0 ? items : undefined;
+}
+
+function normaliseStateUpdates(raw: unknown): SecureScoreStateUpdate[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw
+    .map(asRecord)
+    // CIPP drops Default: it restates Microsoft's own detection and carries no decision.
+    .filter((row) => stringField(row.state)?.toLowerCase() !== 'default')
+    .map((row) =>
+      compact<SecureScoreStateUpdate>({
+        state: stringField(row.state),
+        comment: stringField(row.comment),
+        assignedTo: stringField(row.assignedTo),
+        updatedBy: stringField(row.updatedBy),
+        updatedDateTime: stringField(row.updatedDateTime),
+      })
+    )
+    .filter((entry): entry is SecureScoreStateUpdate => entry !== undefined)
+    .sort((a, b) => {
+      const at = a.updatedDateTime ? Date.parse(a.updatedDateTime) : 0;
+      const bt = b.updatedDateTime ? Date.parse(b.updatedDateTime) : 0;
+      return (Number.isNaN(bt) ? 0 : bt) - (Number.isNaN(at) ? 0 : at);
+    });
+  return items.length > 0 ? items : undefined;
+}
+
+function normaliseControlProfile(raw: Record<string, unknown>): SecureScoreControlProfile | undefined {
+  return compact({
+    id: stringField(raw.id),
+    title: stringField(raw.title),
+    category: stringField(raw.controlCategory),
+    service: stringField(raw.service),
+    maxScore: numberField(raw.maxScore),
+    rank: numberField(raw.rank),
+    deprecated: booleanField(raw.deprecated),
+    implementationCost: stringField(raw.implementationCost),
+    userImpact: stringField(raw.userImpact),
+    remediationImpact: stringField(raw.remediationImpact),
+    tier: stringField(raw.tier),
+    actionType: stringField(raw.actionType),
+    threats: stringList(raw.threats),
+    actionUrl: stringField(raw.actionUrl),
+    remediation: stringField(raw.remediation),
+    compliance: normaliseCompliance(raw.complianceInformation),
+    lastModifiedDateTime: stringField(raw.lastModifiedDateTime),
+    stateUpdates: normaliseStateUpdates(raw.controlStateUpdates),
+  });
+}
+
+/** Higher rank first; unranked profiles sort after ranked ones, then by title. */
+function compareControlProfiles(a: SecureScoreControlProfile, b: SecureScoreControlProfile): number {
+  if (a.rank !== undefined && b.rank !== undefined && a.rank !== b.rank) return b.rank - a.rank;
+  if (a.rank !== undefined && b.rank === undefined) return -1;
+  if (a.rank === undefined && b.rank !== undefined) return 1;
+  return (a.title ?? a.id ?? '').localeCompare(b.title ?? b.id ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -1979,6 +2414,167 @@ export class CippService {
    */
   async listNamedLocations<T = unknown>(tenantFilter: string): Promise<T> {
     return this.request<T>('GET', 'ListNamedLocations', { tenantFilter });
+  }
+
+  /**
+   * GET ListGraphRequest for one Graph collection.
+   *
+   * A permission failure is rewritten so it names `SecurityEvents.Read.All`
+   * instead of relaying Graph's denial as a generic CIPP HTTP 400. Any other
+   * failure is left as `request` threw it.
+   */
+  private async listGraphRequest(
+    tenantFilter: string,
+    endpoint: string,
+    query: Record<string, unknown>
+  ): Promise<unknown> {
+    try {
+      return await this.request<unknown>('GET', 'ListGraphRequest', {
+        tenantFilter,
+        Endpoint: endpoint,
+        ...query,
+      });
+    } catch (err) {
+      if (err instanceof McpError && GRAPH_ACCESS_DENIED_RE.test(err.message)) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Microsoft Graph refused ${endpoint} for ${tenantFilter}. Secure Score needs the ` +
+            'SecurityEvents.Read.All application permission (SecurityEvents.ReadWrite.All also works) ' +
+            `consented in that tenant, plus GDAP that can read security data. Upstream said: ${err.message}`
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Latest Microsoft Secure Score for a tenant, plus recent history.
+   *
+   * Calls `ListGraphRequest` with `Endpoint=security/secureScores`. There is
+   * no dedicated CIPP read endpoint. `NoPagination` is always sent: upstream
+   * treats `$top` as a page size and would otherwise walk every next link,
+   * so a request for 7 readings would return the whole 90-day series.
+   *
+   * @param tenantFilter - Tenant domain or GUID. `allTenants` is rejected.
+   * @param params.top   - Readings to return, 1–90. Defaults to 7.
+   */
+  async getSecureScore(
+    tenantFilter: string,
+    params: { top?: number } = {}
+  ): Promise<SecureScoreReport> {
+    assertSecureScoreSingleTenant(tenantFilter, 'cipp_get_secure_score');
+
+    const top = params.top ?? SECURE_SCORE_DEFAULT_TOP;
+    if (!Number.isInteger(top) || top < 1 || top > SECURE_SCORE_MAX_TOP) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `top must be an integer between 1 and ${SECURE_SCORE_MAX_TOP} ` +
+          `(Microsoft Graph keeps about 90 days of secureScores); got ${String(params.top)}.`
+      );
+    }
+
+    const raw = await this.listGraphRequest(tenantFilter, 'security/secureScores', {
+      $top: top,
+      NoPagination: true,
+    });
+    const scores = graphCollectionRows(raw, 'security/secureScores').sort(
+      (a, b) => scoreTimestamp(b) - scoreTimestamp(a)
+    );
+
+    const history = scores.map(normaliseScorePoint);
+    const warnings: string[] = [];
+
+    if (history.length === 0) {
+      warnings.push(
+        `No Secure Score readings were returned for ${tenantFilter}. Microsoft Graph's ` +
+          'security/secureScores collection is empty for this tenant — a newly onboarded tenant ' +
+          'can take a day to score, and the CIPP app needs SecurityEvents.Read.All consented there. ' +
+          'This is not a score of zero.'
+      );
+      return { tenantFilter, source: 'live', requested: top, returned: 0, history, warnings };
+    }
+
+    const latestPoint = history[0];
+    const comparativeScores = normaliseComparative(scores[0].averageComparativeScores);
+    const latest: SecureScoreLatest = {
+      ...latestPoint,
+      ...(compact({
+        id: stringField(scores[0].id),
+        activeUserCount: numberField(scores[0].activeUserCount),
+        licensedUserCount: numberField(scores[0].licensedUserCount),
+        enabledServices: stringList(scores[0].enabledServices),
+        comparedToAllTenants: comparisonPercentage(comparativeScores, 'AllTenants'),
+        comparedToSimilarTenants: comparisonPercentage(comparativeScores, 'TotalSeats'),
+        changeSincePrevious: scoreDelta(latestPoint, history[1]),
+      }) ?? {}),
+      comparativeScores,
+      controls: summariseControlScores(scores[0].controlScores),
+    };
+
+    if (latest.percentage === undefined) {
+      warnings.push(
+        'The latest reading has no usable maximum score, so no percentage is reported. ' +
+          'A percentage of 0 here would be invented.'
+      );
+    }
+    if (history.length >= top) {
+      warnings.push(
+        `Returned the ${top} most recent readings, which is the limit requested; older readings ` +
+          `may exist. Raise top (maximum ${SECURE_SCORE_MAX_TOP}) to see further back.`
+      );
+    }
+
+    return {
+      tenantFilter,
+      source: 'live',
+      requested: top,
+      returned: history.length,
+      latest,
+      history,
+      ...(warnings.length > 0 && { warnings }),
+    };
+  }
+
+  /**
+   * List Secure Score control profiles (the recommendation catalog) for a tenant.
+   *
+   * Calls `ListGraphRequest` with `Endpoint=security/secureScoreControlProfiles`.
+   * `$top` is a page size here and `NoPagination` is deliberately not sent, so
+   * upstream follows `@odata.nextLink` until the catalog is exhausted. This is
+   * the catalog — titles, cost, remediation — not the achievement. Achievement
+   * is on {@link CippService.getSecureScore}.
+   *
+   * @param tenantFilter - Tenant domain or GUID. `allTenants` is rejected.
+   */
+  async listSecureScoreControls(tenantFilter: string): Promise<SecureScoreControlListing> {
+    assertSecureScoreSingleTenant(tenantFilter, 'cipp_list_secure_score_controls');
+
+    const raw = await this.listGraphRequest(tenantFilter, 'security/secureScoreControlProfiles', {
+      $top: SECURE_SCORE_CONTROLS_PAGE_SIZE,
+    });
+    const controls = graphCollectionRows(raw, 'security/secureScoreControlProfiles')
+      .map(normaliseControlProfile)
+      .filter((entry): entry is SecureScoreControlProfile => entry !== undefined)
+      .sort(compareControlProfiles);
+
+    const warnings: string[] = [];
+    if (controls.length === 0) {
+      warnings.push(
+        `No Secure Score control profiles were returned for ${tenantFilter}. This is an empty ` +
+          'catalog, not a fully remediated tenant. Graph security/secureScoreControlProfiles should ' +
+          'list every control Microsoft scores; an empty page usually means SecurityEvents.Read.All ' +
+          'is not consented, or the tenant has no Secure Score data yet.'
+      );
+    }
+
+    return {
+      tenantFilter,
+      source: 'live',
+      returned: controls.length,
+      deprecated: controls.filter((control) => control.deprecated === true).length,
+      ...(warnings.length > 0 && { warnings }),
+      controls,
+    };
   }
 
   // -------------------------------------------------------------------------
