@@ -31,10 +31,21 @@ describe('CippService createUser', () => {
     jest.restoreAllMocks();
   });
 
+  // createUser now returns a VerifiedWrite envelope (readback against
+  // ListUsers) instead of the raw AddUser response -- see
+  // tests/cipp.service.verified-writes.test.ts for the confirmed/pending/
+  // failed envelope coverage. These two tests keep their own distinct value
+  // (multi-@ local parts, which that suite doesn't exercise) by mocking the
+  // readback too, rather than being superseded by it.
   it('splits userPrincipalName into username + Domain and drops the UPN field', async () => {
     const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>((url) => {
       if (url.includes('/api/AddUser')) {
         return Promise.resolve(jsonResponse({ Results: ['Success. The user has been created.'] }));
+      }
+      if (url.includes('/api/ListUsers')) {
+        return Promise.resolve(
+          jsonResponse([{ id: 'obj-1', userPrincipalName: 'alice@contoso.com' }])
+        );
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -56,9 +67,14 @@ describe('CippService createUser', () => {
   });
 
   it('splits on the LAST @ so local parts containing @ do not corrupt the domain', async () => {
-    const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>(() =>
-      Promise.resolve(jsonResponse({ Results: ['ok'] }))
-    );
+    const fetchMock = jest.fn<Promise<Response>, [string, RequestInit]>((url) => {
+      if (url.includes('/api/ListUsers')) {
+        return Promise.resolve(
+          jsonResponse([{ id: 'obj-1', userPrincipalName: 'weird@name@contoso.com' }])
+        );
+      }
+      return Promise.resolve(jsonResponse({ Results: ['ok'] }));
+    });
     global.fetch = fetchMock as unknown as typeof fetch;
 
     await svc.createUser('contoso.com', {
