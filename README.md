@@ -54,6 +54,10 @@ Set these environment variables (or copy `.env.example` to `.env`):
 | `CIPP_TOKEN_SCOPE_FALLBACK` | No | When no explicit scope is set, retry a CIPP HTTP 401 once with the legacy `<clientId>/.default` scope and reuse whichever audience this client accepts. Default: `true`. `TOKEN_SCOPE_FALLBACK` is an alias. Gateway requests can send `x-token-scope-fallback`. |
 | `CIPP_TOKEN_URL` | No | Override OAuth token endpoint (sovereign clouds only). |
 | `MCP_TRANSPORT` | No | `stdio` (default) or `http` |
+| `AUTH_MODE` | No | `env` (stdio and single-tenant HTTP) or `gateway`. Gateway mode requires CIPP credential headers on each `/mcp` request and does not fall back to `CIPP_*`. The container image and the Compose gateway service set `gateway`. |
+| `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service secret shared with the gateway. HTTP logs an error and exits non-zero when this is empty, whitespace, or a known placeholder (`changeme`, `change-me`, `your-s2s-secret`, `your-secret`, `placeholder`, `secret`, `example`, `replace-me`, `replace-with-a-real-secret`, `s2s-secret`, or an unresolved `${...}` value). Compose will not start without it. Never commit a real value. |
+| `MCP_ALLOW_INSECURE_DEV` | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and listens on `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` is ignored and the override is logged. This flag does not bypass a known placeholder. |
+| `MCP_HTTP_HOST` | No | Bind address when `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` is set. Defaults to `127.0.0.1` when unset. The container image sets `0.0.0.0`. |
 | `MCP_HTTP_PORT` | No | Port for HTTP mode (default: 8080) |
 | `LOG_LEVEL` | No | `error`, `warn`, `info` (default), or `debug` |
 
@@ -64,6 +68,58 @@ Set these environment variables (or copy `.env.example` to `.env`):
 > auth intercepts bearer tokens and redirects them to its interactive login page,
 > so every API call fails. Find the Function App (named like `cippXXXXX`) in your
 > CIPP resource group in the Azure Portal.
+
+`/health` stays unauthenticated and does not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+### HTTP authentication
+
+With `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The header value is `t=<unix seconds>,v1=<hex>`, where `v1` is the hex-encoded HMAC-SHA256 of the ASCII string `t=<unix seconds>` keyed with `CONDUIT_S2S_SECRET`. The timestamp must be within 300 seconds of the server clock. A missing or invalid header is HTTP 401, before CIPP credentials are read. The secret is never written to logs.
+
+```
+X-Gateway-S2S: t=1710000000,v1=<64 lowercase hex chars>
+```
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `x-base-url` plus either `x-api-key` or all of `x-tenant-id`, `x-client-id`, and `x-client-secret` (`x-token-scope`, `x-token-url`, and `x-token-scope-fallback` are optional). Those headers are the only CIPP credential source for that request. A request missing them is HTTP 401 and does not use `CIPP_*` from the process environment.
+
+`AUTH_MODE=env` still requires a valid `X-Gateway-S2S` header, then uses `CIPP_*` from the environment.
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` even when `MCP_HTTP_HOST` is `0.0.0.0` or another non-loopback address:
+
+```bash
+MCP_TRANSPORT=http MCP_ALLOW_INSECURE_DEV=1 npm run dev
+```
+
+### Docker
+
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=gateway`. Publish the port on loopback and pass the same S2S secret the gateway uses. In gateway mode, CIPP credentials arrive on each request as headers; they are not read from the environment.
+
+```bash
+docker build -t cipp-mcp .
+docker run --rm \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -p 127.0.0.1:8080:8080 \
+  cipp-mcp
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset. The `cipp-mcp` service is gateway mode: it sets `AUTH_MODE=gateway`, publishes `127.0.0.1:8080:8080`, and does not set `CIPP_API_KEY`, `CIPP_CLIENT_ID`, `CIPP_CLIENT_SECRET`, `CIPP_TENANT_ID`, `CIPP_BASE_URL`, or `env_file`.
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Single-tenant HTTP (`AUTH_MODE=env`) still requires the S2S secret, then uses `CIPP_*`:
+
+```bash
+docker run --rm \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=env \
+  -e CIPP_BASE_URL=https://cippXXXXX.azurewebsites.net \
+  -e CIPP_TENANT_ID=your-entra-tenant-id \
+  -e CIPP_CLIENT_ID=your-client-id \
+  -e CIPP_CLIENT_SECRET=your-client-secret \
+  -p 127.0.0.1:8080:8080 \
+  cipp-mcp
+```
 
 ## Usage with Claude Desktop
 

@@ -1,4 +1,11 @@
 services:
+  # Gateway mode. CIPP credentials arrive per request on x-base-url and either
+  # x-api-key or the OAuth headers (x-tenant-id, x-client-id, x-client-secret).
+  # Do not set CIPP_API_KEY, CIPP_CLIENT_ID, CIPP_CLIENT_SECRET, CIPP_TENANT_ID,
+  # CIPP_BASE_URL, or env_file here — that would put static vendor credentials
+  # in the container. The project .env is used only for Compose interpolation
+  # of CONDUIT_S2S_SECRET. For AUTH_MODE=env, use the dev profile or pass
+  # CIPP_* on that process instead (see the README).
   cipp-mcp:
     build:
       context: .
@@ -7,27 +14,19 @@ services:
     image: cipp-mcp:latest
     container_name: cipp-mcp-server
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      - CIPP_BASE_URL=${CIPP_BASE_URL}
-      - CIPP_API_KEY=${CIPP_API_KEY}
-      - CIPP_TENANT_ID=${CIPP_TENANT_ID}
-      - CIPP_CLIENT_ID=${CIPP_CLIENT_ID}
-      - CIPP_CLIENT_SECRET=${CIPP_CLIENT_SECRET}
-      - CIPP_TOKEN_SCOPE=${CIPP_TOKEN_SCOPE}
-      - CIPP_TOKEN_URL=${CIPP_TOKEN_URL}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - MCP_TRANSPORT=http
       - MCP_HTTP_PORT=8080
       - MCP_HTTP_HOST=0.0.0.0
-      - AUTH_MODE=${AUTH_MODE:-env}
+      - AUTH_MODE=gateway
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
       - NODE_ENV=production
     volumes:
       - cipp-mcp-logs:/app/logs
-    expose:
-      - "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s
@@ -43,6 +42,9 @@ services:
           cpus: "0.1"
           memory: 128M
 
+  # Single-tenant HTTP (AUTH_MODE=env). Not the gateway service: this profile
+  # may carry CIPP_* for local development. Host port 8081 so it can run
+  # beside cipp-mcp. Still requires CONDUIT_S2S_SECRET.
   cipp-mcp-dev:
     profiles: ["dev"]
     build:
@@ -69,10 +71,11 @@ services:
       - MCP_HTTP_PORT=8080
       - MCP_HTTP_HOST=0.0.0.0
       - AUTH_MODE=${AUTH_MODE:-env}
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
     env_file:
       - .env
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8081:8080"
     volumes:
       - .:/app
       - /app/node_modules
@@ -86,8 +89,11 @@ volumes:
   cipp-mcp-dev-logs:
     driver: local
 
-# Example .env file structure (create this file with your actual credentials):
+# The gateway service above does not load CIPP_* . For the dev profile
+# (AUTH_MODE=env), create a .env with your Function App URL and credentials.
+# CONDUIT_S2S_SECRET must be set for either service and must not be a placeholder.
 # CIPP_BASE_URL=https://cippXXXXX.azurewebsites.net   # Function App URL, not the SWA UI URL
 # CIPP_API_KEY=your-api-key-here
+# CONDUIT_S2S_SECRET=
 # LOG_LEVEL=info
 # LOG_FORMAT=json

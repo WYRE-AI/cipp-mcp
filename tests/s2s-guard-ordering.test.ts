@@ -88,11 +88,9 @@ describe('S2S guard ordering vs. lazy CIPP OAuth exchange', () => {
   let realFetch: typeof fetch;
 
   beforeAll(async () => {
-    // server.ts reads CONDUIT_S2S_SECRET into a module-level const at
-    // import time (`const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || ''`),
-    // so the env var must be set BEFORE the module is first required, and
-    // modules must be reset in case an earlier test file already cached an
-    // unconfigured copy.
+    // HTTP startup reads CONDUIT_S2S_SECRET when start() binds the listener.
+    // Set it before start(). resetModules keeps this file isolated from a
+    // server module another test file may already have loaded.
     process.env.CONDUIT_S2S_SECRET = TEST_S2S_SECRET;
     process.env.AUTH_MODE = 'gateway';
     process.env.MCP_TRANSPORT = 'http';
