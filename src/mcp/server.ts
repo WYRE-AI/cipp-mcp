@@ -186,7 +186,7 @@ Tool categories:
 - Users: list, create, edit, disable, offboard, MFA/session management, BEC check
 - Groups: list and create Azure AD groups
 - Mailboxes: list mailboxes and permissions, configure OoO and forwarding
-- Security: Conditional Access policies, named locations
+- Security: Conditional Access policies, named locations, Microsoft Secure Score (one tenant; allTenants is rejected)
 - Standards: compliance standards, BPA results, domain health
 - Licenses: per-tenant and CSP-level license reporting
 - Alerts: audit logs and alert queue

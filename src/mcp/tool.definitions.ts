@@ -866,6 +866,74 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       required: ['tenantFilter'],
     },
   },
+  {
+    name: 'cipp_get_secure_score',
+    description:
+      "Read a tenant's Microsoft Secure Score live: latest points, percentage of the " +
+      'maximum, comparison with all tenants (basis AllTenants) and similarly sized tenants ' +
+      '(basis TotalSeats), the control-by-control achievement on that latest reading ' +
+      '(lowest completion first), and the recent daily history newest-first. There is no ' +
+      'dedicated CIPP list endpoint — this calls ListGraphRequest with Endpoint ' +
+      'security/secureScores. top defaults to 7 and caps at 90; it is sent with ' +
+      'NoPagination so it limits the series instead of only setting Graph\'s page size. ' +
+      "allTenants is rejected (CIPP's estate view is the nightly cache, not this call). " +
+      'An empty collection is reported as no reading, never as a score of zero. ' +
+      'Changing a control\'s state is not this tool.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            "Tenant domain name or ID. 'allTenants' is not supported — Secure Score is read " +
+            'live for one tenant. The estate view is CIPP\'s nightly cache.',
+        },
+        top: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 90,
+          description:
+            'How many of the most recent daily readings to return (default 7, the window ' +
+            "CIPP's Secure Score page charts; maximum 90). Sent as Graph $top together with " +
+            'NoPagination. A result that fills the limit carries a warning that older readings may exist.',
+        },
+      },
+      required: ['tenantFilter'],
+    },
+    annotations: {
+      title: 'Get Microsoft Secure Score',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
+  {
+    name: 'cipp_list_secure_score_controls',
+    description:
+      'List a tenant\'s Microsoft Secure Score control profiles — the recommendation ' +
+      'catalog, not the achievement. Each profile includes title, category, rank, max ' +
+      'points, implementation cost, user impact, remediation, threats, compliance mappings, ' +
+      'and any non-default state updates (resolved by a third party, or ignored / risk ' +
+      'accepted). Calls ListGraphRequest with Endpoint security/secureScoreControlProfiles. ' +
+      'Use cipp_get_secure_score for the current score and which controls are complete. ' +
+      "allTenants is rejected. Read-only; CIPP's ExecUpdateSecureScore write is not exposed.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description:
+            "Tenant domain name or ID. 'allTenants' is not supported — control profiles are " +
+            'read live for one tenant.',
+        },
+      },
+      required: ['tenantFilter'],
+    },
+    annotations: {
+      title: 'List Secure Score controls',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
 
   // -------------------------------------------------------------------------
   // Applications tools
@@ -1240,7 +1308,12 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
     'cipp_set_out_of_office',
     'cipp_set_email_forwarding',
   ],
-  security: ['cipp_list_conditional_access_policies', 'cipp_list_named_locations'],
+  security: [
+    'cipp_list_conditional_access_policies',
+    'cipp_list_named_locations',
+    'cipp_get_secure_score',
+    'cipp_list_secure_score_controls',
+  ],
   applications: ['cipp_list_enterprise_apps'],
   standards: [
     'cipp_list_standards',
