@@ -22,7 +22,7 @@ jobs:
       packages: write
       id-token: write
       security-events: write
-    uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@2b0b056bd7544937e5cbd56cf2e1ff8a180a411f
+    uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@c6bc27678918c6364b428a1b2fc6d05b9baf7560
     with:
       server-name: cipp-mcp
       image-name: ghcr.io/wyre-ai/cipp-mcp
