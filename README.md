@@ -163,6 +163,18 @@ Add to your `claude_desktop_config.json`:
 | Scheduler | list_scheduled_items, add_scheduled_item |
 | Core | ping, get_version, list_logs |
 
+### Editing a user right after creating it
+
+`edit_user` first resolves the account's current UPN, because CIPP's
+`Invoke-EditUser` rebuilds the UPN from `username` + `Domain` on every call and
+editing without it would rename the account. Graph can lag a few seconds behind
+a just-created account, so when that lookup finds nothing, answers HTTP 404, or
+fails with an HTTP error (e.g. 500) whose body is Graph's not-found
+(`Request_ResourceNotFound` / "does not exist"), it is retried up to 4 attempts
+in total, waiting 1s, 3s and 6s (~10s). Other errors (400, 401, 403, other 5xx)
+are not retried. If the user still isn't visible the error says so; wait a
+moment and retry.
+
 ### Mailbox and archive sizes
 
 `list_mailbox_usage` reports every mailbox in a tenant — primary size, item

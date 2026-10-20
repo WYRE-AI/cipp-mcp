@@ -1133,6 +1133,18 @@ export class CippService {
   private readonly tokenProvider: TokenProvider | undefined;
   private readonly logger: Logger;
 
+  /**
+   * Waits between {@link resolveUserIdentity} attempts (one entry per retry, so
+   * `length + 1` attempts in total). Graph can lag behind a just-created
+   * account by several seconds. Overridable for tests.
+   */
+  protected userLookupRetryDelaysMs: readonly number[] = [1000, 3000, 6000];
+
+  /** Overridable so tests can run the retry loop without real waiting. */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   constructor(config: CippServiceConfig, logger: Logger) {
     const { baseUrl, apiKey, tenantId, clientId, clientSecret, tokenScope, tokenUrl, tokenScopeFallback } =
       config.cipp;
@@ -1519,34 +1531,65 @@ export class CippService {
     const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const byId = GUID_RE.test(upnOrId);
 
-    const rows = await this.request<Array<Record<string, unknown>>>('GET', 'ListUsers', {
-      tenantFilter,
-      ...(byId
-        ? { UserID: upnOrId }
-        : { graphFilter: `userPrincipalName eq '${upnOrId.replace(/'/g, "''")}'` }),
-    });
+    const delays = this.userLookupRetryDelaysMs;
+    const attempts = delays.length + 1;
 
-    const list = Array.isArray(rows) ? rows : [];
-    const match = byId
-      ? list[0]
-      : list.find(
-          (u) =>
-            typeof u.userPrincipalName === 'string' &&
-            u.userPrincipalName.toLowerCase() === upnOrId.toLowerCase()
+    for (let attempt = 1; ; attempt++) {
+      let list: Array<Record<string, unknown>> = [];
+      let notFound = false;
+      try {
+        const rows = await this.request<Array<Record<string, unknown>>>('GET', 'ListUsers', {
+          tenantFilter,
+          ...(byId
+            ? { UserID: upnOrId }
+            : { graphFilter: `userPrincipalName eq '${upnOrId.replace(/'/g, "''")}'` }),
+        });
+        list = Array.isArray(rows) ? rows : [];
+      } catch (err) {
+        // "Not there yet" is an HTTP 404, or an HTTP error whose body is Graph's
+        // not-found (Invoke-ListUsers rethrows Graph's error, so a fresh object
+        // id surfaces as a 500 with Request_ResourceNotFound). Everything else
+        // (400/401/403, other 5xx) bubbles on the first attempt.
+        if (
+          err instanceof McpError &&
+          (/returned HTTP 404\b/.test(err.message) || /Request_ResourceNotFound|does not exist/i.test(err.message))
+        ) {
+          notFound = true;
+        } else {
+          throw err;
+        }
+      }
+
+      const match = byId
+        ? list[0]
+        : list.find(
+            (u) =>
+              typeof u.userPrincipalName === 'string' &&
+              u.userPrincipalName.toLowerCase() === upnOrId.toLowerCase()
+          );
+
+      const upn = typeof match?.userPrincipalName === 'string' ? match.userPrincipalName : undefined;
+      const id = typeof match?.id === 'string' ? match.id : undefined;
+
+      if (!notFound && upn && id && upn.includes('@')) {
+        const at = upn.lastIndexOf('@');
+        return { id, userPrincipalName: upn, username: upn.slice(0, at), domain: upn.slice(at + 1) };
+      }
+
+      if (attempt >= attempts) {
+        const waitedSeconds = Math.round(delays.reduce((a, b) => a + b, 0) / 1000);
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. ${reason} ` +
+            `Retried ${attempts} times over ~${waitedSeconds}s. A just-created account can take longer to ` +
+            `appear in Microsoft Graph; if this user was created moments ago, retry shortly.`
         );
+      }
 
-    const upn = typeof match?.userPrincipalName === 'string' ? match.userPrincipalName : undefined;
-    const id = typeof match?.id === 'string' ? match.id : undefined;
-
-    if (!upn || !id || !upn.includes('@')) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. ${reason}`
-      );
+      const delay = delays[attempt - 1];
+      this.logger.debug('User not yet visible in ListUsers; retrying', { tenantFilter, attempt, delayMs: delay });
+      await this.sleep(delay);
     }
-
-    const at = upn.lastIndexOf('@');
-    return { id, userPrincipalName: upn, username: upn.slice(0, at), domain: upn.slice(at + 1) };
   }
 
   /**

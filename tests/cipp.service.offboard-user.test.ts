@@ -1,7 +1,7 @@
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { CippService } from '../src/services/cipp.service.js';
 import { Logger } from '../src/utils/logger.js';
-import { jsonResponse, bodyOf, calledEndpoint } from './helpers.js';
+import { jsonResponse, bodyOf, calledEndpoint, withNoLookupDelay } from './helpers.js';
 
 const logger = new Logger('error');
 
@@ -170,7 +170,7 @@ describe('CippService offboardUser', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(
-      svc.offboardUser('contoso.com', USER_ID, { DeleteUser: true })
+      withNoLookupDelay(svc).offboardUser('contoso.com', USER_ID, { DeleteUser: true })
     ).rejects.toBeInstanceOf(McpError);
     expect(calledEndpoint(fetchMock, '/api/ExecOffboardUser')).toBe(false);
   });

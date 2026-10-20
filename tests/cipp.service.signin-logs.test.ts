@@ -1,7 +1,7 @@
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { CippService } from '../src/services/cipp.service.js';
 import { Logger } from '../src/utils/logger.js';
-import { jsonResponse, errorResponse, queryOf, calledEndpoint } from './helpers.js';
+import { jsonResponse, errorResponse, queryOf, calledEndpoint, withNoLookupDelay } from './helpers.js';
 
 const logger = new Logger('error');
 
@@ -150,9 +150,9 @@ describe('CippService listUserSigninLogs', () => {
   it('refuses an unresolvable user instead of reporting no sign-ins', async () => {
     const fetchMock = mockCipp(() => jsonResponse([]), []);
 
-    await expect(svc.listUserSigninLogs('contoso.com', 'ghost@contoso.com')).rejects.toThrow(
-      /Entra object id/
-    );
+    await expect(
+      withNoLookupDelay(svc).listUserSigninLogs('contoso.com', 'ghost@contoso.com')
+    ).rejects.toThrow(/Entra object id/);
     expect(calledEndpoint(fetchMock, '/api/ListUserSigninLogs')).toBe(false);
   });
 

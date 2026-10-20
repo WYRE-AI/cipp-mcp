@@ -2,7 +2,7 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { CippService } from '../src/services/cipp.service.js';
 import { Logger } from '../src/utils/logger.js';
 import { GIB } from '../src/utils/bytes.js';
-import { jsonResponse, errorResponse, queryOf, calledEndpoint } from './helpers.js';
+import { jsonResponse, errorResponse, queryOf, calledEndpoint, withNoLookupDelay } from './helpers.js';
 
 const logger = new Logger('error');
 
@@ -452,8 +452,8 @@ describe('CippService getMailboxUsage', () => {
       Promise.resolve(jsonResponse([]))
     ) as unknown as typeof fetch;
 
-    await expect(svc.getMailboxUsage('contoso.com', 'ghost@contoso.com')).rejects.toThrow(
-      /Entra object id/i
-    );
+    await expect(
+      withNoLookupDelay(svc).getMailboxUsage('contoso.com', 'ghost@contoso.com')
+    ).rejects.toThrow(/Entra object id/i);
   });
 });

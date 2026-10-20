@@ -172,7 +172,11 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       "⚠ HIGH-IMPACT. Edits an existing user's properties, which can include " +
       'directory attributes, usage location, and may grant or revoke roles or ' +
       'license eligibility. Reversible by editing again. ' +
-      'Confirm with the user before invoking.',
+      'Confirm with the user before invoking. CIPP rebuilds the UPN from the ' +
+      "account's current username + domain on every edit, so the current UPN " +
+      'is always resolved first (editing without it would rename the account). ' +
+      'That lookup is retried for ~10s when the user is not found yet, because ' +
+      'a just-created account can lag in Microsoft Graph.',
     annotations: {
       title: 'Edit user (high-impact)',
       readOnlyHint: false,
