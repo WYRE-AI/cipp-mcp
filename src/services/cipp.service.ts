@@ -1552,7 +1552,8 @@ export class CippService {
         // (400/401/403, other 5xx) bubbles on the first attempt.
         if (
           err instanceof McpError &&
-          (/returned HTTP 404\b/.test(err.message) || /Request_ResourceNotFound|does not exist/i.test(err.message))
+          (/returned HTTP 404\b/.test(err.message) ||
+            /returned HTTP (?!4\d\d)\d{3}\b[\s\S]*(?:Request_ResourceNotFound|does not exist)/i.test(err.message))
         ) {
           notFound = true;
         } else {

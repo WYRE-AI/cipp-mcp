@@ -382,6 +382,17 @@ describe('CippService editUser', () => {
       expect(calls(m, 'EditUser')).toHaveLength(1);
     });
 
+    it.each([400, 401, 403])('does not retry HTTP %i even when the body has the not-found marker', async (status) => {
+      const m = mockListUsers([() => errorResponse(status, 'Request_ResourceNotFound: does not exist')]);
+
+      await expect(fast.editUser('contoso.com', userId, { displayName: 'A' })).rejects.toThrow(
+        new RegExp(`HTTP ${status}`)
+      );
+
+      expect(calls(m, 'ListUsers')).toHaveLength(1);
+      expect(calls(m, 'EditUser')).toHaveLength(0);
+    });
+
     it.each([400, 401, 403, 500])('does not retry HTTP %i', async (status) => {
       const m = mockListUsers([() => errorResponse(status)]);
 
