@@ -295,7 +295,6 @@ Tool categories:
         }
 
         let toolHandler = this.toolHandler;
-        let cippService = this.cippService;
 
         if (isGatewayMode) {
           // Credentials must arrive on this request. Falling through would
@@ -346,7 +345,7 @@ Tool categories:
             },
           };
 
-          cippService = new CippService(requestConfig, this.logger);
+          const cippService = new CippService(requestConfig, this.logger);
           toolHandler = new CippToolHandler(cippService, this.logger);
         }
 
