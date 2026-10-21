@@ -422,13 +422,25 @@ describe('CippService editUser', () => {
 
     it('retries a 500 with a plain-text not-found marker', async () => {
       const m = mockListUsers([
-        () => errorResponse(500, 'Resource does not exist'),
+        () =>
+          errorResponse(
+            500,
+            "Resource '00000000-0000-0000-0000-000000000000' does not exist or one of its queried reference-property objects are not present."
+          ),
         () => jsonResponse(found),
       ]);
 
       await fast.editUser('contoso.com', userId, { displayName: 'A' });
 
       expect(calls(m, 'ListUsers')).toHaveLength(2);
+    });
+
+    it('does not retry a 500 with an unrelated "does not exist" body', async () => {
+      const m = mockListUsers([() => errorResponse(500, 'The license SKU does not exist in this tenant')]);
+
+      await expect(fast.editUser('contoso.com', userId, { displayName: 'A' })).rejects.toThrow(/HTTP 500/);
+
+      expect(calls(m, 'ListUsers')).toHaveLength(1);
     });
 
     it('does not retry a plain 500', async () => {

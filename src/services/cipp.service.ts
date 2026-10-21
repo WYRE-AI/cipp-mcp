@@ -1134,6 +1134,7 @@ export class CippHttpError extends McpError {
 }
 
 const GRAPH_NOT_FOUND_CODE = 'Request_ResourceNotFound';
+const GRAPH_NOT_FOUND_TEXT = /Resource '[^']*' does not exist or one of its queried reference-property objects are not present/i;
 
 /** True when a parsed JSON value carries Graph's not-found code in a common spot. */
 function jsonHasNotFoundCode(value: unknown, depth = 0): boolean {
@@ -1155,8 +1156,11 @@ function bodyIndicatesGraphNotFound(body: string): boolean {
   } catch {
     // not JSON; fall through to the substring check
   }
-  const lower = body.toLowerCase();
-  return lower.includes(GRAPH_NOT_FOUND_CODE.toLowerCase()) || lower.includes('does not exist');
+  // Text fallback: Graph's code, or Graph's own resource-not-found sentence
+  // ("Resource '<id>' does not exist or one of its queried reference-property
+  // objects are not present."). A bare "does not exist" (e.g. a missing
+  // license) is not enough.
+  return body.toLowerCase().includes(GRAPH_NOT_FOUND_CODE.toLowerCase()) || GRAPH_NOT_FOUND_TEXT.test(body);
 }
 
 /**

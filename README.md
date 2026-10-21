@@ -169,8 +169,9 @@ Add to your `claude_desktop_config.json`:
 `Invoke-EditUser` rebuilds the UPN from `username` + `Domain` on every call and
 editing without it would rename the account. Graph can lag a few seconds behind
 a just-created account, so when that lookup finds nothing, answers HTTP 404, or
-fails with a 5xx whose body is Graph's not-found (`Request_ResourceNotFound` /
-"does not exist"), it is retried up to 4 attempts in total, waiting 1s, 3s and
+fails with a 5xx whose body is Graph's not-found (the `Request_ResourceNotFound`
+code, or Graph's "Resource '<id>' does not exist or one of its queried
+reference-property objects are not present" message), it is retried up to 4 attempts in total, waiting 1s, 3s and
 6s (~10s). The decision uses the HTTP status, not message text; any other 4xx
 (400, 401, 403) and other 5xx are not retried. If the user still isn't visible
 the error says "Tried N times" and, when the last attempt got an HTTP error,
