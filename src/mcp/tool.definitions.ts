@@ -249,7 +249,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: 'cipp_reset_password',
     description:
       '⚠ HIGH-IMPACT. Resets a user\'s password, invalidating their current ' +
-      'password. Reversible by setting a new password. Confirm with the user before invoking.',
+      'password. CIPP always generates the new password itself (a caller cannot choose one) and returns it ' +
+      'in the response, or a PWPush link if PWPush is enabled in CIPP, so treat the response as a secret. ' +
+      'The previous password cannot be restored; resetting again issues another new one. Confirm with the user before invoking.',
     annotations: {
       title: 'Reset password (reversible)',
       readOnlyHint: false,
@@ -262,11 +264,6 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       properties: {
         tenantFilter: TENANT_FILTER_PROP,
         userId: USER_ID_PROP,
-        newPassword: {
-          type: 'string',
-          description:
-            'The replacement password to set. If omitted, a random password is generated and returned in the response.',
-        },
       },
       required: ['tenantFilter', 'userId'],
     },

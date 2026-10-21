@@ -1,5 +1,5 @@
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import { CippService } from '../src/services/cipp.service.js';
+import { CippService, CippHttpError } from '../src/services/cipp.service.js';
 import { Logger } from '../src/utils/logger.js';
 import { withNoLookupDelay } from './helpers.js';
 
@@ -350,7 +350,7 @@ describe('CippService editUser', () => {
       const m = mockListUsers([() => jsonResponse([])]);
 
       await expect(fast.editUser('contoso.com', userId, { displayName: 'A' })).rejects.toThrow(
-        /Could not resolve user[\s\S]*Retried 4 times[\s\S]*Microsoft Graph[\s\S]*retry shortly/
+        /Could not resolve user[\s\S]*Tried 4 times[\s\S]*Microsoft Graph[\s\S]*retry shortly/
       );
 
       expect(calls(m, 'ListUsers')).toHaveLength(4);
@@ -391,6 +391,91 @@ describe('CippService editUser', () => {
 
       expect(calls(m, 'ListUsers')).toHaveLength(1);
       expect(calls(m, 'EditUser')).toHaveLength(0);
+    });
+
+    it.each([401, 403])('does not retry HTTP %i whose body mentions "returned HTTP 404" and the marker', async (status) => {
+      const m = mockListUsers([
+        () => errorResponse(status, 'upstream returned HTTP 404: Request_ResourceNotFound'),
+      ]);
+
+      await expect(fast.editUser('contoso.com', userId, { displayName: 'A' })).rejects.toThrow(
+        new RegExp(`HTTP ${status}`)
+      );
+
+      expect(calls(m, 'ListUsers')).toHaveLength(1);
+    });
+
+    it('retries a 500 with a JSON Request_ResourceNotFound error body', async () => {
+      const m = mockListUsers([
+        () =>
+          errorResponse(
+            500,
+            JSON.stringify({ error: { code: 'Request_ResourceNotFound', message: 'gone' } })
+          ),
+        () => jsonResponse(found),
+      ]);
+
+      await fast.editUser('contoso.com', userId, { displayName: 'A' });
+
+      expect(calls(m, 'ListUsers')).toHaveLength(2);
+    });
+
+    it('retries a 500 with a plain-text not-found marker', async () => {
+      const m = mockListUsers([
+        () => errorResponse(500, 'Resource does not exist'),
+        () => jsonResponse(found),
+      ]);
+
+      await fast.editUser('contoso.com', userId, { displayName: 'A' });
+
+      expect(calls(m, 'ListUsers')).toHaveLength(2);
+    });
+
+    it('does not retry a plain 500', async () => {
+      const m = mockListUsers([() => errorResponse(500, 'Internal failure')]);
+
+      await expect(fast.editUser('contoso.com', userId, { displayName: 'A' })).rejects.toThrow(
+        /HTTP 500/
+      );
+
+      expect(calls(m, 'ListUsers')).toHaveLength(1);
+    });
+
+    it('reports the last upstream status after exhausting retries on 404', async () => {
+      const m = mockListUsers([() => errorResponse(404, 'not found')]);
+
+      const err = (await fast
+        .editUser('contoso.com', userId, { displayName: 'A' })
+        .catch((e: unknown) => e)) as Error;
+
+      expect(err.message).toMatch(/Tried 4 times/);
+      expect(err.message).toContain('Last upstream status: HTTP 404.');
+      expect(err.message).not.toContain('not found');
+      expect(calls(m, 'ListUsers')).toHaveLength(4);
+    });
+
+    it('omits the status suffix when exhaustion came from empty lists', async () => {
+      mockListUsers([() => jsonResponse([])]);
+
+      const err = (await fast
+        .editUser('contoso.com', userId, { displayName: 'A' })
+        .catch((e: unknown) => e)) as Error;
+
+      expect(err.message).not.toContain('Last upstream status');
+    });
+
+    it('CippHttpError is an McpError carrying status and body with the unchanged message', async () => {
+      global.fetch = jest.fn(() =>
+        Promise.resolve(errorResponse(418, 'teapot'))
+      ) as unknown as typeof fetch;
+
+      const err = await fast.listTenants().catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(CippHttpError);
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as CippHttpError).status).toBe(418);
+      expect((err as CippHttpError).responseBody).toBe('teapot');
+      expect((err as Error).message).toMatch(/CIPP API returned HTTP 418 for GET .*ListTenants.*: teapot$/);
     });
 
     it.each([400, 401, 403, 500])('does not retry HTTP %i', async (status) => {
