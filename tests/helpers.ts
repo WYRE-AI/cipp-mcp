@@ -49,3 +49,12 @@ export function queryOf(
   if (!call) throw new Error(`no request was sent to ${endpoint}`);
   return new URL(call[0]).searchParams;
 }
+
+/**
+ * Make a service's user-lookup retry (WYREAI-530) instant. Tests that expect an
+ * unresolvable user would otherwise wait out the real ~10s backoff.
+ */
+export function withNoLookupDelay<T extends object>(svc: T): T {
+  Object.assign(svc, { userLookupRetryDelaysMs: [0, 0, 0], sleep: () => Promise.resolve() });
+  return svc;
+}

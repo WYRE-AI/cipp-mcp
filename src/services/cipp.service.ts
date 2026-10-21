@@ -1111,6 +1111,71 @@ function compareControlProfiles(a: SecureScoreControlProfile, b: SecureScoreCont
 }
 
 // ---------------------------------------------------------------------------
+// HTTP errors
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-2xx response from CIPP. The message is identical to a plain McpError
+ * (including the response body); `status` and `responseBody` exist so callers
+ * can classify failures without pattern-matching message text, which the SDK
+ * prefixes with "MCP error <code>: " and which embeds the body. Never copy
+ * `responseBody` into a new message: it may carry sensitive data.
+ */
+export class CippHttpError extends McpError {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    readonly status: number,
+    readonly responseBody: string
+  ) {
+    super(code, message);
+    this.name = 'CippHttpError';
+  }
+}
+
+const GRAPH_NOT_FOUND_CODE = 'Request_ResourceNotFound';
+const GRAPH_NOT_FOUND_TEXT = /Resource '[^']*' does not exist or one of its queried reference-property objects are not present/i;
+
+/** True when a parsed JSON value carries Graph's not-found code in a common spot. */
+function jsonHasNotFoundCode(value: unknown, depth = 0): boolean {
+  if (depth > 4 || value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.includes(GRAPH_NOT_FOUND_CODE);
+  if (Array.isArray(value)) return value.some((v) => jsonHasNotFoundCode(v, depth + 1));
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (obj.code === GRAPH_NOT_FOUND_CODE) return true;
+    return ['error', 'Error', 'Results', 'results'].some((k) => jsonHasNotFoundCode(obj[k], depth + 1));
+  }
+  return false;
+}
+
+/** Whether a response body indicates Graph's "resource does not exist". */
+function bodyIndicatesGraphNotFound(body: string): boolean {
+  try {
+    if (jsonHasNotFoundCode(JSON.parse(body))) return true;
+  } catch {
+    // not JSON; fall through to the substring check
+  }
+  // Text fallback: Graph's code, or Graph's own resource-not-found sentence
+  // ("Resource '<id>' does not exist or one of its queried reference-property
+  // objects are not present."). A bare "does not exist" (e.g. a missing
+  // license) is not enough.
+  return body.toLowerCase().includes(GRAPH_NOT_FOUND_CODE.toLowerCase()) || GRAPH_NOT_FOUND_TEXT.test(body);
+}
+
+/**
+ * A user lookup that may succeed shortly: HTTP 404, or a 5xx whose body is
+ * Graph's not-found (Invoke-ListUsers rethrows Graph's error as a 500). Keyed
+ * off the structured status and body, never the message text. Other 4xx and
+ * non-HTTP errors are never retried.
+ */
+function isUserNotFoundYet(err: unknown): err is CippHttpError {
+  if (!(err instanceof CippHttpError)) return false;
+  if (err.status === 404) return true;
+  return err.status >= 500 && err.status <= 599 && bodyIndicatesGraphNotFound(err.responseBody);
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -1132,6 +1197,18 @@ export class CippService {
   private readonly apiKey: string | undefined;
   private readonly tokenProvider: TokenProvider | undefined;
   private readonly logger: Logger;
+
+  /**
+   * Waits between {@link resolveUserIdentity} attempts (one entry per retry, so
+   * `length + 1` attempts in total). Graph can lag behind a just-created
+   * account by several seconds. Overridable for tests.
+   */
+  protected userLookupRetryDelaysMs: readonly number[] = [1000, 3000, 6000];
+
+  /** Overridable so tests can run the retry loop without real waiting. */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   constructor(config: CippServiceConfig, logger: Logger) {
     const { baseUrl, apiKey, tenantId, clientId, clientSecret, tokenScope, tokenUrl, tokenScopeFallback } =
@@ -1299,9 +1376,11 @@ export class CippService {
         retriedAlternate && response.status === 401
           ? ` Retried once with scope ${fallbackScope}; that token was also rejected.`
           : '';
-      throw new McpError(
+      throw new CippHttpError(
         ErrorCode.InternalError,
-        `CIPP API returned HTTP ${response.status} for ${method} ${url.toString()}: ${responseBody}${fallbackNote}`
+        `CIPP API returned HTTP ${response.status} for ${method} ${url.toString()}: ${responseBody}${fallbackNote}`,
+        response.status,
+        responseBody
       );
     }
 
@@ -1519,34 +1598,64 @@ export class CippService {
     const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const byId = GUID_RE.test(upnOrId);
 
-    const rows = await this.request<Array<Record<string, unknown>>>('GET', 'ListUsers', {
-      tenantFilter,
-      ...(byId
-        ? { UserID: upnOrId }
-        : { graphFilter: `userPrincipalName eq '${upnOrId.replace(/'/g, "''")}'` }),
-    });
+    const delays = this.userLookupRetryDelaysMs;
+    const attempts = delays.length + 1;
 
-    const list = Array.isArray(rows) ? rows : [];
-    const match = byId
-      ? list[0]
-      : list.find(
-          (u) =>
-            typeof u.userPrincipalName === 'string' &&
-            u.userPrincipalName.toLowerCase() === upnOrId.toLowerCase()
+    for (let attempt = 1; ; attempt++) {
+      let list: Array<Record<string, unknown>> = [];
+      let notFound = false;
+      let lastStatus: number | undefined;
+      try {
+        const rows = await this.request<Array<Record<string, unknown>>>('GET', 'ListUsers', {
+          tenantFilter,
+          ...(byId
+            ? { UserID: upnOrId }
+            : { graphFilter: `userPrincipalName eq '${upnOrId.replace(/'/g, "''")}'` }),
+        });
+        list = Array.isArray(rows) ? rows : [];
+      } catch (err) {
+        // "Not there yet" is an HTTP 404, or a 5xx whose body is Graph's
+        // not-found (see isUserNotFoundYet). Everything else bubbles on the
+        // first attempt.
+        if (isUserNotFoundYet(err)) {
+          notFound = true;
+          lastStatus = err.status;
+        } else {
+          throw err;
+        }
+      }
+
+      const match = byId
+        ? list[0]
+        : list.find(
+            (u) =>
+              typeof u.userPrincipalName === 'string' &&
+              u.userPrincipalName.toLowerCase() === upnOrId.toLowerCase()
+          );
+
+      const upn = typeof match?.userPrincipalName === 'string' ? match.userPrincipalName : undefined;
+      const id = typeof match?.id === 'string' ? match.id : undefined;
+
+      if (!notFound && upn && id && upn.includes('@')) {
+        const at = upn.lastIndexOf('@');
+        return { id, userPrincipalName: upn, username: upn.slice(0, at), domain: upn.slice(at + 1) };
+      }
+
+      if (attempt >= attempts) {
+        const waitedSeconds = Math.round(delays.reduce((a, b) => a + b, 0) / 1000);
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. ${reason} ` +
+            `Tried ${attempts} times over ~${waitedSeconds}s. A just-created account can take longer to ` +
+            `appear in Microsoft Graph; if this user was created moments ago, retry shortly.` +
+            (lastStatus !== undefined ? ` Last upstream status: HTTP ${lastStatus}.` : '')
         );
+      }
 
-    const upn = typeof match?.userPrincipalName === 'string' ? match.userPrincipalName : undefined;
-    const id = typeof match?.id === 'string' ? match.id : undefined;
-
-    if (!upn || !id || !upn.includes('@')) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Could not resolve user "${upnOrId}" to a current UPN in tenant ${tenantFilter}. ${reason}`
-      );
+      const delay = delays[attempt - 1];
+      this.logger.debug('User not yet visible in ListUsers; retrying', { tenantFilter, attempt, delayMs: delay });
+      await this.sleep(delay);
     }
-
-    const at = upn.lastIndexOf('@');
-    return { id, userPrincipalName: upn, username: upn.slice(0, at), domain: upn.slice(at + 1) };
   }
 
   /**
@@ -1632,17 +1741,16 @@ export class CippService {
    *
    * @param tenantFilter - Tenant domain or identifier.
    * @param userId       - Azure AD object ID of the user.
-   * @param newPassword  - Optional explicit password; omit to let CIPP generate one.
+   *
+   * CIPP's `Set-CIPPResetPassword` always generates the password itself
+   * (`New-passwordString`) and ignores any supplied one, so none is sent. The
+   * response carries the generated password, or a PWPush link when PWPush is
+   * enabled in CIPP; treat it as a secret.
    */
-  async resetPassword<T = unknown>(
-    tenantFilter: string,
-    userId: string,
-    newPassword?: string
-  ): Promise<T> {
+  async resetPassword<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
     return this.request<T>('POST', 'ExecResetPass', undefined, {
       tenantFilter,
       ID: userId,
-      ...(newPassword && { newPassword }),
     });
   }
 
