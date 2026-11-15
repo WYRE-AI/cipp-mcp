@@ -251,6 +251,7 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       '⚠ HIGH-IMPACT. Resets a user\'s password, invalidating their current ' +
       'password. CIPP always generates the new password itself (a caller cannot choose one) and returns it ' +
       'in the response, or a PWPush link if PWPush is enabled in CIPP, so treat the response as a secret. ' +
+      'Optional mustChange (default false) sets forceChangePasswordNextSignIn so the user must change the password at next sign-in. ' +
       'The previous password cannot be restored; resetting again issues another new one. Confirm with the user before invoking.',
     annotations: {
       title: 'Reset password (reversible)',
@@ -264,6 +265,11 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       properties: {
         tenantFilter: TENANT_FILTER_PROP,
         userId: USER_ID_PROP,
+        mustChange: {
+          type: 'boolean',
+          description:
+            'When true, the user must change the password at next sign-in (CIPP MustChange / forceChangePasswordNextSignIn). Defaults to false.',
+        },
       },
       required: ['tenantFilter', 'userId'],
     },

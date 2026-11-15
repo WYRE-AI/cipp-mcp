@@ -1741,16 +1741,24 @@ export class CippService {
    *
    * @param tenantFilter - Tenant domain or identifier.
    * @param userId       - Azure AD object ID of the user.
+   * @param mustChange   - When true, CIPP sets forceChangePasswordNextSignIn
+   *                       (request body `MustChange`). Defaults to false to
+   *                       match ExecResetPass when the flag is omitted.
    *
    * CIPP's `Set-CIPPResetPassword` always generates the password itself
    * (`New-passwordString`) and ignores any supplied one, so none is sent. The
    * response carries the generated password, or a PWPush link when PWPush is
    * enabled in CIPP; treat it as a secret.
    */
-  async resetPassword<T = unknown>(tenantFilter: string, userId: string): Promise<T> {
+  async resetPassword<T = unknown>(
+    tenantFilter: string,
+    userId: string,
+    mustChange = false
+  ): Promise<T> {
     return this.request<T>('POST', 'ExecResetPass', undefined, {
       tenantFilter,
       ID: userId,
+      MustChange: mustChange,
     });
   }
 

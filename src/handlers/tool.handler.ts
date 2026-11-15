@@ -148,8 +148,12 @@ export class CippToolHandler {
         }
 
         case 'cipp_reset_password': {
-          const { tenantFilter, userId } = args as { tenantFilter: string; userId: string };
-          result = await this.cippService.resetPassword(tenantFilter, userId);
+          const { tenantFilter, userId, mustChange } = args as {
+            tenantFilter: string;
+            userId: string;
+            mustChange?: boolean;
+          };
+          result = await this.cippService.resetPassword(tenantFilter, userId, mustChange ?? false);
           break;
         }
 
