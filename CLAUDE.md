@@ -5,8 +5,8 @@
 Every request body and query string here is shaped against CIPP's own
 `Invoke-*.ps1` handler, read from source, not inferred from the endpoint name or
 from general Exchange/Graph knowledge. That is not pedantry — the bugs fixed in
-[#67](https://github.com/wyre-technology/cipp-mcp/issues/67),
-[#72](https://github.com/wyre-technology/cipp-mcp/issues/72)–[#76](https://github.com/wyre-technology/cipp-mcp/issues/76)
+[#67](https://github.com/WYRE-AI/cipp-mcp/issues/67),
+[#72](https://github.com/WYRE-AI/cipp-mcp/issues/72)–[#76](https://github.com/WYRE-AI/cipp-mcp/issues/76)
 were all cases where a plausible-looking payload matched nothing upstream and
 CIPP reported success anyway.
 
