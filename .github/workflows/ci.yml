@@ -16,5 +16,5 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: wyre-technology/.github/.github/workflows/mcp-server-ci.yml@8328fa348eefa317ce0e6b757279c61ae86f100c
+    uses: WYRE-AI/.github/.github/workflows/mcp-server-ci.yml@542c9ed380fff70fab36234fc222cf9e7a076de9
     secrets: inherit
