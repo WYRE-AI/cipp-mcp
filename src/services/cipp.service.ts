@@ -2775,14 +2775,21 @@ export class CippService {
     const warnings: string[] = [];
     if (summary.intuneSynced === false) {
       warnings.push(
-        "CIPP's cached Intune detected-apps dataset is empty for this tenant (most likely never synced; " +
-          'run a CIPP DB cache sync), so detectedApps being empty is not evidence that no AI software is installed.'
+        "CIPP's cached Intune detected-apps dataset has no rows for this tenant (it may never have been synced, " +
+          'or the sync may have returned nothing), so detectedApps being empty is not evidence that no AI software is installed.'
       );
     }
     if (summary.entraSynced === false) {
       warnings.push(
-        "CIPP's cached service-principal dataset is empty for this tenant (most likely never synced; " +
-          'run a CIPP DB cache sync), so consentedApps being empty is not evidence that no AI apps are consented.'
+        "CIPP's cached service-principal dataset has no rows for this tenant (it may never have been synced, " +
+          'or the sync may have returned nothing), so consentedApps being empty is not evidence that no AI apps are consented.'
+      );
+    }
+    const consentedApps = objectRows(body.consentedApps).map(without('applicationUsers'));
+    if (consentedApps.length > 0) {
+      warnings.push(
+        'activeUsersLast7Days and signInsLast7Days default to 0 and are only filled when the best-effort sign-in ' +
+          'lookup succeeds (it is skipped without Entra P1 and covers only the first 15 matched apps), so 0 does not establish zero activity.'
       );
     }
 
@@ -2793,7 +2800,7 @@ export class CippService {
       byRisk: Array.isArray(body.byRisk) ? body.byRisk : [],
       topTools: Array.isArray(body.topTools) ? body.topTools : [],
       detectedApps: objectRows(body.detectedApps).map(without('managedDevices')),
-      consentedApps: objectRows(body.consentedApps).map(without('applicationUsers')),
+      consentedApps,
       ...(warnings.length > 0 && { warnings }),
     };
   }

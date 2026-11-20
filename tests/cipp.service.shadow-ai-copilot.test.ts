@@ -73,7 +73,8 @@ describe('CippService getShadowAi', () => {
     expect(report.summary.aiToolsDetected).toBe(2);
     expect(report.byRisk).toEqual([{ risk: 'High', tools: 1 }]);
     expect(report.topTools).toHaveLength(1);
-    expect(report.warnings).toBeUndefined();
+    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings?.[0]).toMatch(/does not establish zero activity/);
   });
 
   it('drops per-device and per-user rows unless detail is requested', async () => {
@@ -90,7 +91,7 @@ describe('CippService getShadowAi', () => {
     expect(full.consentedApps[0].applicationUsers).toHaveLength(1);
   });
 
-  it('warns that empty lists mean unsynced data when CIPP has not cached the datasets', async () => {
+  it('warns that empty lists are not evidence of absence when CIPP has no cached rows', async () => {
     mockFetch(
       shadowAiBody({
         summary: { aiToolsDetected: 0, intuneSynced: false, entraSynced: false },
@@ -102,8 +103,9 @@ describe('CippService getShadowAi', () => {
     const report = await service().getShadowAi('contoso.com');
 
     expect(report.warnings).toHaveLength(2);
-    expect(report.warnings?.join(' ')).toMatch(/most likely never synced/);
-    expect(report.warnings?.join(' ')).toMatch(/dataset is empty/);
+    expect(report.warnings?.join(' ')).toMatch(/has no rows/);
+    expect(report.warnings?.join(' ')).toMatch(/may never have been synced, or the sync may have returned nothing/);
+    expect(report.warnings?.join(' ')).not.toMatch(/most likely never synced/);
   });
 
   it('tolerates empty collections that PowerShell collapsed to null', async () => {

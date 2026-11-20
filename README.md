@@ -274,8 +274,8 @@ active users per product, the default), `Trend` (per-date counts) or
   `Tenant.AI.Read` role on the CIPP API client. CIPP's sanction write
   (`ExecShadowAISanction`) and Copilot settings are not exposed.
 - **Shadow AI reads CIPP's cache.** Only the sign-in lookup is live. If the
-  Intune or Entra cache is empty (most likely never synced), the response
-  carries a warning: empty lists then mean no data, not no AI. Per-device and per-user rows are
+  Intune or Entra cache has no rows (never synced, or a sync that returned
+  nothing), the response carries a warning: empty lists then mean no data, not no AI. Per-device and per-user rows are
   dropped unless `detail=true`.
 - **Copilot reports can be empty without meaning zero usage.** A tenant with
   no Copilot licences or report data, or missing `Reports.Read.All` via GDAP,

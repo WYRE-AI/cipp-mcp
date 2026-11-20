@@ -948,8 +948,8 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       "rates them, and whether they are sanctioned. Calls ListShadowAI, which matches CIPP's CACHED " +
       'Intune detected apps (AI software on managed devices), Entra service principals and OAuth grants ' +
       'against its curated AI catalog; only a 7-day sign-in lookup for matched apps is live (best effort: skipped without Entra P1, and limited to the first 15 matched apps, so activeUsersLast7Days and signInsLast7Days of 0 are not proof of no usage). Returns a ' +
-      'summary, counts by category and risk, topTools, detectedApps and consentedApps. If the cache was ' +
-      'empty (likely never synced) the summary says so and a warning is added: empty lists then mean no data, not no AI. ' +
+      'summary, counts by category and risk, topTools, detectedApps and consentedApps. If a cached ' +
+      'dataset has no rows (never synced, or a sync that returned nothing) the summary says so and a warning is added: empty lists then mean no data, not no AI. Whenever consentedApps is non-empty a warning also notes that zero sign-in counters do not establish zero activity. ' +
       'By default per-device and per-user rows are dropped (counts stay); set detail=true to keep them. ' +
       'allTenants is rejected. Read-only; needs the Tenant.AI.Read role in CIPP. ' +
       'Marking a tool sanctioned (ExecShadowAISanction) is not exposed.',
