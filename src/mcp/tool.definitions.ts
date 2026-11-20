@@ -941,6 +941,83 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       destructiveHint: false,
     },
   },
+  {
+    name: 'cipp_get_shadow_ai',
+    description:
+      'Shadow AI overview for one tenant: which AI tools and apps CIPP can see, how risky its catalog ' +
+      "rates them, and whether they are sanctioned. Calls ListShadowAI, which matches CIPP's CACHED " +
+      'Intune detected apps (AI software on managed devices), Entra service principals and OAuth grants ' +
+      'against its curated AI catalog; only a 7-day sign-in lookup for matched apps is live. Returns a ' +
+      'summary, counts by category and risk, topTools, detectedApps and consentedApps. If the cache was ' +
+      'never synced the summary says so and a warning is added: empty lists then mean no data, not no AI. ' +
+      'By default per-device and per-user rows are dropped (counts stay); set detail=true to keep them. ' +
+      'allTenants is rejected. Read-only; needs the Tenant.AI.Read role in CIPP. ' +
+      'Marking a tool sanctioned (ExecShadowAISanction) is not exposed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description: "Tenant domain name or ID. 'allTenants' is not supported.",
+        },
+        detail: {
+          type: 'boolean',
+          description:
+            'Keep managedDevices (per detected app) and applicationUsers (per consented app). ' +
+            'Defaults to false because both grow with the tenant.',
+        },
+      },
+      required: ['tenantFilter'],
+    },
+    annotations: {
+      title: 'Get Shadow AI overview',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
+  {
+    name: 'cipp_list_copilot_usage',
+    description:
+      'Microsoft 365 Copilot usage for one tenant, from CIPP ListCopilotUsage (Graph Copilot usage ' +
+      'reports). type=Adoption (default) gives enabled vs active users per product (Any App, Teams, ' +
+      'Word, Excel, PowerPoint, Outlook, OneNote, Loop, Copilot Chat); type=Trend gives per-date ' +
+      "active/enabled user counts; type=UserDetail gives each user's last Copilot activity per app. " +
+      'period is a Graph period such as D28 (default) or D90; tenants still on Copilot reports v1 use D30. ' +
+      'An empty result is reported with a warning and is not zero usage. allTenants is rejected. ' +
+      'Read-only; needs the Tenant.AI.Read role in CIPP. Copilot admin settings are not covered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantFilter: {
+          type: 'string',
+          description: "Tenant domain name or ID. 'allTenants' is not supported.",
+        },
+        type: {
+          type: 'string',
+          enum: ['Adoption', 'Trend', 'UserDetail'],
+          description: 'Which report to read. Defaults to Adoption.',
+        },
+        period: {
+          type: 'string',
+          pattern: '^D\\d{1,3}$',
+          description: 'Graph report period, e.g. D7, D28 (default), D30, D90.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description:
+            'Maximum rows returned (default 100). Mostly matters for UserDetail, which has one row per licensed user.',
+        },
+      },
+      required: ['tenantFilter'],
+    },
+    annotations: {
+      title: 'List Copilot usage',
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+  },
 
   // -------------------------------------------------------------------------
   // Applications tools
@@ -1322,6 +1399,7 @@ export const TOOL_CATEGORIES: Record<string, string[]> = {
     'cipp_list_secure_score_controls',
   ],
   applications: ['cipp_list_enterprise_apps'],
+  ai: ['cipp_get_shadow_ai', 'cipp_list_copilot_usage'],
   standards: [
     'cipp_list_standards',
     'cipp_run_standards_check',

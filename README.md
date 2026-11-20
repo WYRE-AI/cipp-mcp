@@ -9,6 +9,7 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/CyberDrain/CIP
 - Mailbox and online-archive size reporting, per tenant or per user
 - Per-user Entra ID sign-in logs (status, location, Conditional Access, MFA)
 - Security: Conditional Access policies, named locations, Microsoft Secure Score
+- AI: Shadow AI overview and Microsoft 365 Copilot usage
 - Standards & compliance: BPA, domain health, drift detection
 - License reporting (per-tenant and CSP-wide)
 - Alerts, audit logs, and scheduled tasks
@@ -156,6 +157,7 @@ Add to your `claude_desktop_config.json`:
 | Mailboxes | list_mailboxes, list_mailbox_permissions, list_trusted_blocked_senders, list_mailbox_usage, get_mailbox_usage, set_out_of_office, set_email_forwarding |
 | Security | list_conditional_access_policies, list_named_locations, get_secure_score, list_secure_score_controls |
 | Applications | list_enterprise_apps |
+| AI | get_shadow_ai, list_copilot_usage |
 | Standards | list_standards, run_standards_check, list_standard_templates, get_tenant_drift, get_tenant_alignment, create_standard_template, delete_standard_template, list_bpa, list_domain_health |
 | Licenses | list_licenses, list_csp_licenses |
 | Alerts | list_audit_logs, list_alert_queue |
@@ -257,6 +259,29 @@ Secure Score page does, with `Endpoint` set to `security/secureScores` or
   "similar tenants" is `TotalSeats`. Those figures are already percentages.
   The percentage of the tenant's own score is `currentScore / maxScore`, and
   it is omitted when the maximum is missing rather than reported as 0%.
+
+### Shadow AI and Copilot usage
+
+`get_shadow_ai` wraps CIPP's `ListShadowAI`: AI software on managed devices
+(Intune detected apps) and AI applications in Entra, matched against CIPP's AI
+catalog, with a risk rating, sanctioned status and 7-day sign-in usage.
+`list_copilot_usage` wraps `ListCopilotUsage`: `type` is `Adoption` (enabled vs
+active users per product, the default), `Trend` (per-date counts) or
+`UserDetail` (last activity per user per app), for a Graph `period` such as
+`D28` (default) or `D90`.
+
+- **Read-only, one tenant.** `allTenants` is rejected. Both endpoints need the
+  `Tenant.AI.Read` role on the CIPP API client. CIPP's sanction write
+  (`ExecShadowAISanction`) and Copilot settings are not exposed.
+- **Shadow AI reads CIPP's cache.** Only the sign-in lookup is live. If the
+  Intune or Entra datasets were never synced, the response carries a warning:
+  empty lists then mean no data, not no AI. Per-device and per-user rows are
+  dropped unless `detail=true`.
+- **Copilot reports can be empty without meaning zero usage.** A tenant with
+  no Copilot licences, a period Graph has no report for (v2 uses `D28`, v1
+  tenants `D30`), or missing `Reports.Read.All` via GDAP all return nothing,
+  and the tool says so. `UserDetail` returns at most `limit` rows (default
+  100, maximum 1000).
 
 ### CIPP version compatibility
 

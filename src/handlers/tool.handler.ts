@@ -3,7 +3,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { CippService, OutOfOfficeInput } from '../services/cipp.service.js';
+import { CippService, CopilotUsageType, OutOfOfficeInput } from '../services/cipp.service.js';
 import { Logger } from '../utils/logger.js';
 import { TOOL_DEFINITIONS } from '../mcp/tool.definitions.js';
 
@@ -354,6 +354,26 @@ export class CippToolHandler {
             includeBuiltIn?: boolean;
           };
           result = await this.cippService.listEnterpriseApps(tenantFilter, { includeBuiltIn });
+          break;
+        }
+
+        // -----------------------------------------------------------------------
+        // Shadow AI and Copilot usage
+        // -----------------------------------------------------------------------
+        case 'cipp_get_shadow_ai': {
+          const { tenantFilter, detail } = args as { tenantFilter: string; detail?: boolean };
+          result = await this.cippService.getShadowAi(tenantFilter, { detail });
+          break;
+        }
+
+        case 'cipp_list_copilot_usage': {
+          const { tenantFilter, type, period, limit } = args as {
+            tenantFilter: string;
+            type?: CopilotUsageType;
+            period?: string;
+            limit?: number;
+          };
+          result = await this.cippService.listCopilotUsage(tenantFilter, { type, period, limit });
           break;
         }
 
