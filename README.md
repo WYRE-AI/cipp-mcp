@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for [CIPP](https://github.com/CyberDrain/CIP
 
 ## Features
 
-- **49 tools** across 12 categories
+- **51 tools** across 13 categories
 - Tenant, user, group, and mailbox management
 - Mailbox and online-archive size reporting, per tenant or per user
 - Per-user Entra ID sign-in logs (status, location, Conditional Access, MFA)
@@ -274,14 +274,14 @@ active users per product, the default), `Trend` (per-date counts) or
   `Tenant.AI.Read` role on the CIPP API client. CIPP's sanction write
   (`ExecShadowAISanction`) and Copilot settings are not exposed.
 - **Shadow AI reads CIPP's cache.** Only the sign-in lookup is live. If the
-  Intune or Entra datasets were never synced, the response carries a warning:
-  empty lists then mean no data, not no AI. Per-device and per-user rows are
+  Intune or Entra cache is empty (most likely never synced), the response
+  carries a warning: empty lists then mean no data, not no AI. Per-device and per-user rows are
   dropped unless `detail=true`.
 - **Copilot reports can be empty without meaning zero usage.** A tenant with
-  no Copilot licences, a period Graph has no report for (v2 uses `D28`, v1
-  tenants `D30`), or missing `Reports.Read.All` via GDAP all return nothing,
-  and the tool says so. `UserDetail` returns at most `limit` rows (default
-  100, maximum 1000).
+  no Copilot licences or report data, or missing `Reports.Read.All` via GDAP,
+  returns no rows, or an `Adoption` report whose counts are all null, and the
+  tool says so. CIPP falls back between `D28` and `D30` itself. `UserDetail`
+  returns at most `limit` rows (default 100, maximum 1000).
 
 ### CIPP version compatibility
 

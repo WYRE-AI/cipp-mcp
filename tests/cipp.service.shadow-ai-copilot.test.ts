@@ -102,7 +102,8 @@ describe('CippService getShadowAi', () => {
     const report = await service().getShadowAi('contoso.com');
 
     expect(report.warnings).toHaveLength(2);
-    expect(report.warnings?.join(' ')).toMatch(/never synced/);
+    expect(report.warnings?.join(' ')).toMatch(/most likely never synced/);
+    expect(report.warnings?.join(' ')).toMatch(/dataset is empty/);
   });
 
   it('tolerates empty collections that PowerShell collapsed to null', async () => {
@@ -123,10 +124,20 @@ describe('CippService getShadowAi', () => {
 });
 
 describe('CippService listCopilotUsage', () => {
-  const adoption = [
-    { product: 'Any App', enabledUsers: 10, activeUsers: 6 },
-    { product: 'Word', enabledUsers: 10, activeUsers: 3 },
+  // Invoke-ListCopilotUsage.ps1 always answers Adoption with one row per $ProductMap entry.
+  const PRODUCTS = [
+    'Any App',
+    'Microsoft Teams',
+    'Word',
+    'Excel',
+    'PowerPoint',
+    'Outlook',
+    'OneNote',
+    'Loop',
+    'Copilot Chat',
   ];
+  const adoption = PRODUCTS.map((product, i) => ({ product, enabledUsers: 10, activeUsers: i }));
+  const adoptionWithoutData = PRODUCTS.map((product) => ({ product, enabledUsers: null, activeUsers: null }));
 
   it('defaults to the Adoption report for D28', async () => {
     const fetchMock = mockFetch(adoption);
@@ -137,7 +148,7 @@ describe('CippService listCopilotUsage', () => {
     expect(query.get('tenantFilter')).toBe('contoso.com');
     expect(query.get('Type')).toBe('Adoption');
     expect(query.get('period')).toBe('D28');
-    expect(report).toMatchObject({ type: 'Adoption', period: 'D28', returned: 2, total: 2 });
+    expect(report).toMatchObject({ type: 'Adoption', period: 'D28', returned: 9, total: 9 });
     expect(report.rows).toEqual(adoption);
     expect(report.warnings).toBeUndefined();
   });
@@ -172,10 +183,27 @@ describe('CippService listCopilotUsage', () => {
   it.each([[[]], [[null]]])('warns instead of reporting zero usage for an empty body %j', async (payload) => {
     mockFetch(payload);
 
-    const report = await service().listCopilotUsage('contoso.com');
+    const report = await service().listCopilotUsage('contoso.com', { type: 'Trend' });
 
     expect(report.returned).toBe(0);
     expect(report.warnings?.join(' ')).toMatch(/not zero usage/);
+  });
+
+  it('warns for the real no-data Adoption shape: 9 product rows with null counts', async () => {
+    mockFetch(adoptionWithoutData);
+
+    const report = await service().listCopilotUsage('contoso.com');
+
+    expect(report.total).toBe(9);
+    expect(report.warnings?.join(' ')).toMatch(/not zero usage/);
+  });
+
+  it('does not warn when an Adoption report has real zero counts', async () => {
+    mockFetch(PRODUCTS.map((product) => ({ product, enabledUsers: 5, activeUsers: 0 })));
+
+    const report = await service().listCopilotUsage('contoso.com');
+
+    expect(report.warnings).toBeUndefined();
   });
 
   it('surfaces an upstream failure as an error', async () => {

@@ -2775,14 +2775,14 @@ export class CippService {
     const warnings: string[] = [];
     if (summary.intuneSynced === false) {
       warnings.push(
-        'CIPP has no cached Intune detected-apps data for this tenant, so detectedApps is empty ' +
-          'because it was never synced, not because no AI software is installed.'
+        "CIPP's cached Intune detected-apps dataset is empty for this tenant (most likely never synced; " +
+          'run a CIPP DB cache sync), so detectedApps being empty is not evidence that no AI software is installed.'
       );
     }
     if (summary.entraSynced === false) {
       warnings.push(
-        'CIPP has no cached service-principal data for this tenant, so consentedApps is empty ' +
-          'because it was never synced, not because no AI apps are consented.'
+        "CIPP's cached service-principal dataset is empty for this tenant (most likely never synced; " +
+          'run a CIPP DB cache sync), so consentedApps being empty is not evidence that no AI apps are consented.'
       );
     }
 
@@ -2845,12 +2845,17 @@ export class CippService {
     });
     const all = objectRows(Array.isArray(raw) ? raw : asRecord(raw).Results);
 
+    // CIPP always answers Adoption with one row per product; with no Graph summary every count is null.
+    const noData =
+      all.length === 0 ||
+      (type === 'Adoption' && all.every((row) => row.enabledUsers == null && row.activeUsers == null));
+
     const warnings: string[] = [];
-    if (all.length === 0) {
+    if (noData) {
       warnings.push(
-        `No Copilot ${type} rows were returned for ${tenantFilter} (${period}). This is not zero usage: ` +
-          'the tenant may have no Microsoft 365 Copilot licences, Graph may have no report for that ' +
-          'period (Copilot reports v2 uses D28, v1 tenants use D30), or CIPP may lack Reports.Read.All via GDAP.'
+        `No Copilot ${type} data was returned for ${tenantFilter} (${period}). This is not zero usage: ` +
+          'the tenant may have no Microsoft 365 Copilot licences or report data, or CIPP may lack ' +
+          'Reports.Read.All via GDAP.'
       );
     } else if (all.length > limit) {
       warnings.push(

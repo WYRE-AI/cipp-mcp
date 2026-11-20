@@ -947,9 +947,9 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
       'Shadow AI overview for one tenant: which AI tools and apps CIPP can see, how risky its catalog ' +
       "rates them, and whether they are sanctioned. Calls ListShadowAI, which matches CIPP's CACHED " +
       'Intune detected apps (AI software on managed devices), Entra service principals and OAuth grants ' +
-      'against its curated AI catalog; only a 7-day sign-in lookup for matched apps is live. Returns a ' +
+      'against its curated AI catalog; only a 7-day sign-in lookup for matched apps is live (best effort: skipped without Entra P1, and limited to the first 15 matched apps, so activeUsersLast7Days and signInsLast7Days of 0 are not proof of no usage). Returns a ' +
       'summary, counts by category and risk, topTools, detectedApps and consentedApps. If the cache was ' +
-      'never synced the summary says so and a warning is added: empty lists then mean no data, not no AI. ' +
+      'empty (likely never synced) the summary says so and a warning is added: empty lists then mean no data, not no AI. ' +
       'By default per-device and per-user rows are dropped (counts stay); set detail=true to keep them. ' +
       'allTenants is rejected. Read-only; needs the Tenant.AI.Read role in CIPP. ' +
       'Marking a tool sanctioned (ExecShadowAISanction) is not exposed.',
@@ -979,11 +979,11 @@ export const TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: 'cipp_list_copilot_usage',
     description:
       'Microsoft 365 Copilot usage for one tenant, from CIPP ListCopilotUsage (Graph Copilot usage ' +
-      'reports). type=Adoption (default) gives enabled vs active users per product (Any App, Teams, ' +
+      'reports). type=Adoption (default) gives enabled vs active users per product (Any App, Microsoft Teams, ' +
       'Word, Excel, PowerPoint, Outlook, OneNote, Loop, Copilot Chat); type=Trend gives per-date ' +
       "active/enabled user counts; type=UserDetail gives each user's last Copilot activity per app. " +
-      'period is a Graph period such as D28 (default) or D90; tenants still on Copilot reports v1 use D30. ' +
-      'An empty result is reported with a warning and is not zero usage. allTenants is rejected. ' +
+      'period is a Graph period such as D28 (default) or D90; CIPP falls back between D28 and D30 automatically. ' +
+      'An empty result, or an Adoption report whose counts are all null, is reported with a warning and is not zero usage. allTenants is rejected. ' +
       'Read-only; needs the Tenant.AI.Read role in CIPP. Copilot admin settings are not covered.',
     inputSchema: {
       type: 'object',
