@@ -931,6 +931,56 @@ function graphCollectionRows(raw: unknown, endpoint: string): Record<string, unk
   );
 }
 
+/** What {@link CippService.getShadowAi} returns: CIPP's `ListShadowAI` body, plus warnings. */
+export interface ShadowAiReport {
+  tenantFilter: string;
+  summary: Record<string, unknown>;
+  byCategory: unknown[];
+  byRisk: unknown[];
+  topTools: unknown[];
+  /** AI software found on managed devices (Intune detected apps). */
+  detectedApps: Record<string, unknown>[];
+  /** AI applications present in Entra (service principals), with last-7-day sign-in usage. */
+  consentedApps: Record<string, unknown>[];
+  warnings?: string[];
+}
+
+export type CopilotUsageType = 'Adoption' | 'Trend' | 'UserDetail';
+
+/** What {@link CippService.listCopilotUsage} returns. */
+export interface CopilotUsageReport {
+  tenantFilter: string;
+  type: CopilotUsageType;
+  period: string;
+  returned: number;
+  /** Rows CIPP returned before `limit` was applied. */
+  total: number;
+  rows: Record<string, unknown>[];
+  warnings?: string[];
+}
+
+const COPILOT_USAGE_TYPES: readonly CopilotUsageType[] = ['Adoption', 'Trend', 'UserDetail'];
+const COPILOT_DEFAULT_PERIOD = 'D28';
+const COPILOT_DEFAULT_LIMIT = 100;
+const COPILOT_MAX_LIMIT = 1000;
+
+/** Shadow AI and Copilot usage are read for one tenant; CIPP has no all-tenants branch for either. */
+function assertSingleTenant(tenantFilter: string, tool: string): void {
+  if (tenantFilter.trim().toLowerCase() === 'alltenants') {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `${tool} reads one tenant at a time; allTenants is not supported. Name the tenant domain or ID.`
+    );
+  }
+}
+
+/** Keep object rows from a CIPP array body; CIPP can collapse an empty PowerShell array to `[null]`. */
+function objectRows(value: unknown): Record<string, unknown>[] {
+  return (Array.isArray(value) ? value : []).filter(
+    (row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)
+  );
+}
+
 /** Live Secure Score reads are per tenant. AllTenants is the nightly cache, which this does not call. */
 function assertSecureScoreSingleTenant(tenantFilter: string, tool: string): void {
   if (tenantFilter.trim().toLowerCase() === 'alltenants') {
@@ -2690,6 +2740,144 @@ export class CippService {
       deprecated: controls.filter((control) => control.deprecated === true).length,
       ...(warnings.length > 0 && { warnings }),
       controls,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Shadow AI and Copilot usage
+  // -------------------------------------------------------------------------
+
+  /**
+   * Shadow AI overview for a tenant. Calls `ListShadowAI`
+   * (`Get-CIPPShadowAIReport`), which matches CIPP's CACHED Intune detected
+   * apps, service principals and OAuth grants against its curated AI catalog.
+   * Nothing is enumerated live except a bounded 7-day sign-in lookup.
+   *
+   * @param tenantFilter   - Tenant domain or GUID. `allTenants` is rejected.
+   * @param params.detail  - Keep per-device and per-user rows (`managedDevices`,
+   *                         `applicationUsers`). Off by default: they grow with
+   *                         the tenant and the counts are already in each row.
+   */
+  async getShadowAi(
+    tenantFilter: string,
+    params: { detail?: boolean } = {}
+  ): Promise<ShadowAiReport> {
+    assertSingleTenant(tenantFilter, 'cipp_get_shadow_ai');
+
+    const body = asRecord(await this.request<unknown>('GET', 'ListShadowAI', { tenantFilter }));
+    const summary = asRecord(body.summary);
+    const without = (field: string) => (row: Record<string, unknown>) => {
+      if (params.detail) return row;
+      const { [field]: _omitted, ...rest } = row;
+      return rest;
+    };
+
+    const warnings: string[] = [];
+    if (summary.intuneSynced === false) {
+      warnings.push(
+        "CIPP's cached Intune detected-apps dataset has no rows for this tenant (it may never have been synced, " +
+          'or the sync may have returned nothing), so detectedApps being empty is not evidence that no AI software is installed.'
+      );
+    }
+    if (summary.entraSynced === false) {
+      warnings.push(
+        "CIPP's cached service-principal dataset has no rows for this tenant (it may never have been synced, " +
+          'or the sync may have returned nothing), so consentedApps being empty is not evidence that no AI apps are consented.'
+      );
+    }
+    const consentedApps = objectRows(body.consentedApps).map(without('applicationUsers'));
+    if (consentedApps.length > 0) {
+      warnings.push(
+        'activeUsersLast7Days and signInsLast7Days default to 0 and are only filled when the best-effort sign-in ' +
+          'lookup succeeds (it is skipped without Entra P1 and covers only the first 15 matched apps), so 0 does not establish zero activity.'
+      );
+    }
+
+    return {
+      tenantFilter,
+      summary,
+      byCategory: Array.isArray(body.byCategory) ? body.byCategory : [],
+      byRisk: Array.isArray(body.byRisk) ? body.byRisk : [],
+      topTools: Array.isArray(body.topTools) ? body.topTools : [],
+      detectedApps: objectRows(body.detectedApps).map(without('managedDevices')),
+      consentedApps,
+      ...(warnings.length > 0 && { warnings }),
+    };
+  }
+
+  /**
+   * Microsoft 365 Copilot usage reports for a tenant. Calls `ListCopilotUsage`,
+   * which flattens Graph's `copilot/reports/getMicrosoft365Copilot*` reports:
+   * `Adoption` (enabled vs active users per product), `Trend` (per-date counts)
+   * or `UserDetail` (last activity per user per app).
+   *
+   * @param tenantFilter   - Tenant domain or GUID. `allTenants` is rejected.
+   * @param params.type    - Report to read. Defaults to `Adoption`.
+   * @param params.period  - Graph period such as `D28` (default) or `D90`.
+   * @param params.limit   - Maximum rows returned, 1-1000. Defaults to 100.
+   */
+  async listCopilotUsage(
+    tenantFilter: string,
+    params: { type?: CopilotUsageType; period?: string; limit?: number } = {}
+  ): Promise<CopilotUsageReport> {
+    assertSingleTenant(tenantFilter, 'cipp_list_copilot_usage');
+
+    const type = params.type ?? 'Adoption';
+    if (!COPILOT_USAGE_TYPES.includes(type)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `type must be one of ${COPILOT_USAGE_TYPES.join(', ')}; got ${String(type)}.`
+      );
+    }
+    const period = params.period ?? COPILOT_DEFAULT_PERIOD;
+    if (!/^D\d{1,3}$/.test(period)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `period must look like D7, D28, D30 or D90; got ${String(params.period)}.`
+      );
+    }
+    const limit = params.limit ?? COPILOT_DEFAULT_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > COPILOT_MAX_LIMIT) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `limit must be an integer between 1 and ${COPILOT_MAX_LIMIT}; got ${String(params.limit)}.`
+      );
+    }
+
+    // ListCopilotUsage replies with a bare array; accept { Results } as other list endpoints do.
+    const raw = await this.request<unknown>('GET', 'ListCopilotUsage', {
+      tenantFilter,
+      Type: type,
+      period,
+    });
+    const all = objectRows(Array.isArray(raw) ? raw : asRecord(raw).Results);
+
+    // CIPP always answers Adoption with one row per product; with no Graph summary every count is null.
+    const noData =
+      all.length === 0 ||
+      (type === 'Adoption' && all.every((row) => row.enabledUsers == null && row.activeUsers == null));
+
+    const warnings: string[] = [];
+    if (noData) {
+      warnings.push(
+        `No Copilot ${type} data was returned for ${tenantFilter} (${period}). This is not zero usage: ` +
+          'the tenant may have no Microsoft 365 Copilot licences or report data, or CIPP may lack ' +
+          'Reports.Read.All via GDAP.'
+      );
+    } else if (all.length > limit) {
+      warnings.push(
+        `Returned ${limit} of ${all.length} rows. Raise limit (maximum ${COPILOT_MAX_LIMIT}) to see more.`
+      );
+    }
+
+    return {
+      tenantFilter,
+      type,
+      period,
+      returned: Math.min(all.length, limit),
+      total: all.length,
+      rows: all.slice(0, limit),
+      ...(warnings.length > 0 && { warnings }),
     };
   }
 
