@@ -378,4 +378,4 @@ Apache-2.0 — see [LICENSE](LICENSE)
 
 ## Contributing
 
-Issues and PRs welcome. This server is tracked against [wyre-technology/msp-claude-plugins#24](https://github.com/wyre-technology/msp-claude-plugins/issues/24).
+Issues and PRs welcome. This server is tracked against [WYRE-AI/msp-claude-plugins#24](https://github.com/WYRE-AI/msp-claude-plugins/issues/24).
